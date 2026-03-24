@@ -1,6 +1,7 @@
 mod cache;
 mod cli;
 mod config;
+mod embedding;
 mod proxy;
 
 use clap::{Parser, Subcommand};
