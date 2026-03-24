@@ -39,6 +39,7 @@ impl Default for Config {
 impl Config {
     /// Load config from ~/.config/dja/config.toml, falling back to defaults.
     pub fn load() -> Result<Self> {
+        Self::ensure_config_dir()?;
         let path = Self::config_path();
 
         if path.exists() {
@@ -61,7 +62,6 @@ impl Config {
     }
 
     /// Ensure the config directory exists.
-    #[allow(dead_code)]
     pub fn ensure_config_dir() -> Result<()> {
         let dir = Self::config_path()
             .parent()

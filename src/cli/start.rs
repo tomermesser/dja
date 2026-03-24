@@ -2,6 +2,7 @@ use crate::config::Config;
 use crate::proxy;
 use anyhow::{Context, Result};
 use std::fs;
+use tokio::signal::unix::{signal, SignalKind};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -95,9 +96,11 @@ pub async fn run() -> Result<()> {
 
     // Set up graceful shutdown — remove PID file on Ctrl-C / SIGTERM.
     let shutdown = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to listen for ctrl-c");
+        let mut sigterm = signal(SignalKind::terminate()).expect("failed to listen for SIGTERM");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = sigterm.recv() => {},
+        }
         tracing::info!("Shutdown signal received");
     };
 
