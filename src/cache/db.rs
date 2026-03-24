@@ -1,0 +1,121 @@
+use std::path::Path;
+
+use anyhow::{Context, Result};
+use libsql::{Connection, Database};
+
+pub struct CacheDb {
+    #[allow(dead_code)]
+    db: Database,
+    conn: Connection,
+}
+
+const SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS cache (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    prompt_text TEXT NOT NULL,
+    system_hash TEXT NOT NULL,
+    model TEXT NOT NULL,
+    embedding F32_BLOB(384),
+    response_data BLOB NOT NULL,
+    response_size INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    hit_count INTEGER DEFAULT 0,
+    last_hit INTEGER DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS cache_vec_idx ON cache (
+    libsql_vector_idx(embedding, 'metric=cosine')
+);
+
+CREATE INDEX IF NOT EXISTS cache_created_idx ON cache (created_at);
+
+CREATE INDEX IF NOT EXISTS cache_last_hit_idx ON cache (last_hit);
+"#;
+
+impl CacheDb {
+    /// Open the cache database at the given path, creating schema if needed.
+    pub async fn open(db_path: &Path) -> Result<Self> {
+        // Ensure parent directory exists
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+        }
+
+        let db_path_str = db_path.to_str().context("Invalid database path")?;
+        let db = libsql::Builder::new_local(db_path_str)
+            .build()
+            .await
+            .context("Failed to open libSQL database")?;
+
+        let conn = db.connect().context("Failed to connect to database")?;
+
+        // Execute schema statements one by one
+        for statement in SCHEMA.split(';') {
+            let statement = statement.trim();
+            if !statement.is_empty() {
+                conn.execute(statement, ())
+                    .await
+                    .with_context(|| format!("Failed to execute schema statement: {statement}"))?;
+            }
+        }
+
+        Ok(Self { db, conn })
+    }
+
+    /// Open an in-memory database (for tests).
+    #[cfg(test)]
+    pub async fn open_in_memory() -> Result<Self> {
+        let db = libsql::Builder::new_local(":memory:")
+            .build()
+            .await
+            .context("Failed to open in-memory database")?;
+
+        let conn = db.connect().context("Failed to connect to database")?;
+
+        for statement in SCHEMA.split(';') {
+            let statement = statement.trim();
+            if !statement.is_empty() {
+                conn.execute(statement, ())
+                    .await
+                    .with_context(|| format!("Failed to execute schema: {statement}"))?;
+            }
+        }
+
+        Ok(Self { db, conn })
+    }
+
+    /// Get a reference to the database connection.
+    pub(crate) fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
+    /// Return the number of cached entries.
+    pub async fn entry_count(&self) -> Result<u64> {
+        let mut rows = self.conn.query("SELECT COUNT(*) FROM cache", ()).await?;
+        let row = rows.next().await?.context("No result from COUNT")?;
+        let count: i64 = row.get(0)?;
+        Ok(count as u64)
+    }
+
+    /// Return the total size of all cached response data.
+    pub async fn total_size(&self) -> Result<u64> {
+        let mut rows = self
+            .conn
+            .query("SELECT COALESCE(SUM(response_size), 0) FROM cache", ())
+            .await?;
+        let row = rows.next().await?.context("No result from SUM")?;
+        let size: i64 = row.get(0)?;
+        Ok(size as u64)
+    }
+
+    /// Return the total number of cache hits across all entries.
+    pub async fn total_hits(&self) -> Result<u64> {
+        let mut rows = self
+            .conn
+            .query("SELECT COALESCE(SUM(hit_count), 0) FROM cache", ())
+            .await?;
+        let row = rows.next().await?.context("No result from SUM")?;
+        let hits: i64 = row.get(0)?;
+        Ok(hits as u64)
+    }
+}
