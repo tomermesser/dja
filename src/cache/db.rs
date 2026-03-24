@@ -2,11 +2,15 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use libsql::{Connection, Database};
+use tokio::sync::Mutex;
+
+/// Embedding dimension for the cache vector index.
+pub const EMBEDDING_DIM: usize = 384;
 
 pub struct CacheDb {
     #[allow(dead_code)]
     db: Database,
-    conn: Connection,
+    pub(crate) conn: Mutex<Connection>,
 }
 
 const SCHEMA: &str = r#"
@@ -32,6 +36,18 @@ CREATE INDEX IF NOT EXISTS cache_created_idx ON cache (created_at);
 CREATE INDEX IF NOT EXISTS cache_last_hit_idx ON cache (last_hit);
 "#;
 
+async fn apply_schema(conn: &Connection) -> Result<()> {
+    for statement in SCHEMA.split(';') {
+        let statement = statement.trim();
+        if !statement.is_empty() {
+            conn.execute(statement, ())
+                .await
+                .with_context(|| format!("Failed to execute schema statement: {statement}"))?;
+        }
+    }
+    Ok(())
+}
+
 impl CacheDb {
     /// Open the cache database at the given path, creating schema if needed.
     pub async fn open(db_path: &Path) -> Result<Self> {
@@ -48,18 +64,9 @@ impl CacheDb {
             .context("Failed to open libSQL database")?;
 
         let conn = db.connect().context("Failed to connect to database")?;
+        apply_schema(&conn).await?;
 
-        // Execute schema statements one by one
-        for statement in SCHEMA.split(';') {
-            let statement = statement.trim();
-            if !statement.is_empty() {
-                conn.execute(statement, ())
-                    .await
-                    .with_context(|| format!("Failed to execute schema statement: {statement}"))?;
-            }
-        }
-
-        Ok(Self { db, conn })
+        Ok(Self { db, conn: Mutex::new(conn) })
     }
 
     /// Open an in-memory database (for tests).
@@ -71,27 +78,15 @@ impl CacheDb {
             .context("Failed to open in-memory database")?;
 
         let conn = db.connect().context("Failed to connect to database")?;
+        apply_schema(&conn).await?;
 
-        for statement in SCHEMA.split(';') {
-            let statement = statement.trim();
-            if !statement.is_empty() {
-                conn.execute(statement, ())
-                    .await
-                    .with_context(|| format!("Failed to execute schema: {statement}"))?;
-            }
-        }
-
-        Ok(Self { db, conn })
-    }
-
-    /// Get a reference to the database connection.
-    pub(crate) fn conn(&self) -> &Connection {
-        &self.conn
+        Ok(Self { db, conn: Mutex::new(conn) })
     }
 
     /// Return the number of cached entries.
     pub async fn entry_count(&self) -> Result<u64> {
-        let mut rows = self.conn.query("SELECT COUNT(*) FROM cache", ()).await?;
+        let conn = self.conn.lock().await;
+        let mut rows = conn.query("SELECT COUNT(*) FROM cache", ()).await?;
         let row = rows.next().await?.context("No result from COUNT")?;
         let count: i64 = row.get(0)?;
         Ok(count as u64)
@@ -99,8 +94,8 @@ impl CacheDb {
 
     /// Return the total size of all cached response data.
     pub async fn total_size(&self) -> Result<u64> {
-        let mut rows = self
-            .conn
+        let conn = self.conn.lock().await;
+        let mut rows = conn
             .query("SELECT COALESCE(SUM(response_size), 0) FROM cache", ())
             .await?;
         let row = rows.next().await?.context("No result from SUM")?;
@@ -110,8 +105,8 @@ impl CacheDb {
 
     /// Return the total number of cache hits across all entries.
     pub async fn total_hits(&self) -> Result<u64> {
-        let mut rows = self
-            .conn
+        let conn = self.conn.lock().await;
+        let mut rows = conn
             .query("SELECT COALESCE(SUM(hit_count), 0) FROM cache", ())
             .await?;
         let row = rows.next().await?.context("No result from SUM")?;

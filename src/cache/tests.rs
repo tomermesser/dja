@@ -1,8 +1,9 @@
 use super::*;
+use db::EMBEDDING_DIM;
 
 /// Helper: create a dummy 384-dim embedding with a specific pattern
 fn make_embedding(seed: f32) -> Vec<f32> {
-    let mut emb = vec![0.0f32; 384];
+    let mut emb = vec![0.0f32; EMBEDDING_DIM];
     for (i, v) in emb.iter_mut().enumerate() {
         *v = ((i as f32 + seed) * 0.01).sin();
     }
@@ -122,7 +123,9 @@ async fn test_evict_by_ttl() {
         .unwrap();
 
     // Manually set created_at to the past
-    db.conn()
+    db.conn
+        .lock()
+        .await
         .execute("UPDATE cache SET created_at = 1000", ())
         .await
         .unwrap();

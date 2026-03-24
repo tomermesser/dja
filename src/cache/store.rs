@@ -28,8 +28,8 @@ impl CacheDb {
                 .join(",")
         );
 
-        let mut rows = self
-            .conn()
+        let conn = self.conn.lock().await;
+        let mut rows = conn
             .query(
                 "INSERT INTO cache (prompt_text, system_hash, model, embedding, response_data, response_size, created_at)
                  VALUES (?1, ?2, ?3, vector32(?4), ?5, ?6, ?7)

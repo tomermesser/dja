@@ -35,15 +35,17 @@ impl CacheDb {
         // threshold is similarity (e.g. 0.95), so max distance = 1.0 - threshold
         let max_distance = 1.0 - threshold;
 
-        // Use vector_top_k to find nearest neighbor, then join with cache table.
-        // Compute cosine distance via vector_distance_cos() since the virtual table
-        // only exposes the `id` column.
-        let mut rows = self
-            .conn()
+        // Acquire the mutex for the entire SELECT + UPDATE to avoid a race condition.
+        let conn = self.conn.lock().await;
+
+        // Use vector_top_k with k=10 so the WHERE clause on system_hash/model can
+        // filter candidates; k=1 would miss valid matches if the globally nearest
+        // neighbor belongs to a different system/model.
+        let mut rows = conn
             .query(
                 "SELECT c.id, c.prompt_text, c.response_data,
                         vector_distance_cos(c.embedding, vector32(?1)) AS dist
-                 FROM vector_top_k('cache_vec_idx', vector32(?1), 1) AS v
+                 FROM vector_top_k('cache_vec_idx', vector32(?1), 10) AS v
                  JOIN cache AS c ON c.rowid = v.id
                  WHERE c.system_hash = ?2 AND c.model = ?3",
                 libsql::params![embedding_json, system_hash, model],
@@ -72,19 +74,19 @@ impl CacheDb {
             _ => anyhow::bail!("Expected blob for response_data"),
         };
 
-        // Update hit_count and last_hit
+        // Update hit_count and last_hit within the same lock scope — no separate
+        // transaction needed since we hold the Mutex throughout.
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .context("System time before UNIX epoch")?
             .as_secs() as i64;
 
-        self.conn()
-            .execute(
-                "UPDATE cache SET hit_count = hit_count + 1, last_hit = ?1 WHERE id = ?2",
-                libsql::params![now, id],
-            )
-            .await
-            .context("Failed to update hit count")?;
+        conn.execute(
+            "UPDATE cache SET hit_count = hit_count + 1, last_hit = ?1 WHERE id = ?2",
+            libsql::params![now, id],
+        )
+        .await
+        .context("Failed to update hit count")?;
 
         Ok(Some(CacheHit {
             id,

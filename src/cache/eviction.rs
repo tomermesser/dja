@@ -12,8 +12,8 @@ impl CacheDb {
             .as_secs() as i64
             - max_age_secs as i64;
 
-        let deleted = self
-            .conn()
+        let conn = self.conn.lock().await;
+        let deleted = conn
             .execute(
                 "DELETE FROM cache WHERE created_at < ?1",
                 libsql::params![cutoff],
@@ -25,23 +25,21 @@ impl CacheDb {
     }
 
     /// Delete least-recently-used entries to keep total entries at or below `max_entries`.
+    /// The count and delete are combined into a single atomic SQL statement.
     /// Returns the number of deleted entries.
     pub async fn evict_lru(&self, max_entries: u64) -> Result<u64> {
-        let count = self.entry_count().await?;
-        if count <= max_entries {
-            return Ok(0);
-        }
+        let conn = self.conn.lock().await;
 
-        let to_delete = count - max_entries;
-
-        // Delete entries with the oldest last_hit timestamps
-        let deleted = self
-            .conn()
+        // A single atomic statement: delete all entries beyond the max_entries limit,
+        // ordered by least-recently-used. MAX(0, count - max_entries) ensures we
+        // delete nothing when already within the limit.
+        let deleted = conn
             .execute(
                 "DELETE FROM cache WHERE id IN (
-                    SELECT id FROM cache ORDER BY last_hit ASC, created_at ASC LIMIT ?1
+                    SELECT id FROM cache ORDER BY last_hit ASC, created_at ASC
+                    LIMIT MAX(0, (SELECT COUNT(*) FROM cache) - ?1)
                 )",
-                libsql::params![to_delete as i64],
+                libsql::params![max_entries as i64],
             )
             .await
             .context("Failed to evict LRU entries")?;
@@ -51,8 +49,8 @@ impl CacheDb {
 
     /// Delete all cache entries. Returns the number of deleted entries.
     pub async fn clear_all(&self) -> Result<u64> {
-        let deleted = self
-            .conn()
+        let conn = self.conn.lock().await;
+        let deleted = conn
             .execute("DELETE FROM cache", ())
             .await
             .context("Failed to clear cache")?;
