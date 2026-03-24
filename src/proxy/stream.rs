@@ -81,26 +81,25 @@ pub fn inject_cached_marker_sse(raw: &[u8]) -> Vec<u8> {
         if injected {
             break;
         }
-        if event.event_type.as_deref() == Some("content_block_delta") {
-            if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&event.data) {
-                let is_text_delta = json
-                    .get("delta")
-                    .and_then(|d| d.get("type"))
-                    .and_then(|t| t.as_str())
-                    == Some("text_delta");
+        if event.event_type.as_deref() == Some("content_block_delta")
+            && let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&event.data)
+        {
+            let is_text_delta = json
+                .get("delta")
+                .and_then(|d| d.get("type"))
+                .and_then(|t| t.as_str())
+                == Some("text_delta");
 
-                if is_text_delta {
-                    if let Some(text) = json
-                        .get_mut("delta")
-                        .and_then(|d| d.get_mut("text"))
-                        .and_then(|t| t.as_str().map(|s| s.to_string()))
-                    {
-                        json["delta"]["text"] =
-                            serde_json::Value::String(format!("[cached] {text}"));
-                        event.data = serde_json::to_string(&json).unwrap();
-                        injected = true;
-                    }
-                }
+            if is_text_delta
+                && let Some(text) = json
+                    .get_mut("delta")
+                    .and_then(|d| d.get_mut("text"))
+                    .and_then(|t| t.as_str().map(|s| s.to_string()))
+            {
+                json["delta"]["text"] =
+                    serde_json::Value::String(format!("[cached] {text}"));
+                event.data = serde_json::to_string(&json).unwrap();
+                injected = true;
             }
         }
     }
@@ -122,11 +121,11 @@ pub fn inject_cached_marker_json(raw: &[u8]) -> Vec<u8> {
 
     if let Some(content) = json.get_mut("content").and_then(|c| c.as_array_mut()) {
         for block in content {
-            if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-                if let Some(text) = block.get("text").and_then(|t| t.as_str()).map(String::from) {
-                    block["text"] = serde_json::Value::String(format!("[cached] {text}"));
-                    break;
-                }
+            if block.get("type").and_then(|t| t.as_str()) == Some("text")
+                && let Some(text) = block.get("text").and_then(|t| t.as_str()).map(String::from)
+            {
+                block["text"] = serde_json::Value::String(format!("[cached] {text}"));
+                break;
             }
         }
     }
@@ -222,6 +221,16 @@ impl futures::Stream for TeeStream {
                 }
                 Poll::Ready(None)
             }
+        }
+    }
+}
+
+impl Drop for TeeStream {
+    fn drop(&mut self) {
+        // If the stream is dropped before completion, send whatever we have
+        if let Some(tx) = self.tx.take() {
+            let buf = std::mem::take(&mut self.buffer);
+            let _ = tx.send(buf);
         }
     }
 }

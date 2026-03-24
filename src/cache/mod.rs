@@ -7,4 +7,4 @@ mod store;
 mod tests;
 
 pub use db::CacheDb;
-pub use lookup::CacheHit;
+pub use db::EMBEDDING_DIM;

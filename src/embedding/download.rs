@@ -57,8 +57,6 @@ pub async fn download_model() -> Result<PathBuf> {
 /// Download a single file with progress reporting and SHA-256 verification.
 /// Uses an atomic write: writes to a `.tmp` file first, then renames on success.
 async fn download_file(url: &str, dest: &Path, expected_sha256: &str) -> Result<()> {
-    use futures::StreamExt;
-
     let filename = dest
         .file_name()
         .map(|n| n.to_string_lossy().to_string())

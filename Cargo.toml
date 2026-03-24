@@ -34,9 +34,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 tracing-appender = "0.2"
 
 # HTTP client
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
 
 # Utilities
+base64 = "0.22"
 sha2 = "0.10"
 dirs = "6"
 anyhow = "1"
@@ -45,3 +46,6 @@ futures = "0.3"
 http-body-util = "0.1"
 tokio-stream = "0.1"
 libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

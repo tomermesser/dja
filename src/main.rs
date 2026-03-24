@@ -1,9 +1,3 @@
-mod cache;
-mod cli;
-mod config;
-mod embedding;
-mod proxy;
-
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -32,6 +26,9 @@ enum Commands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+        /// Show ASCII bar chart of cache hits by day (last 7 days)
+        #[arg(long)]
+        graph: bool,
     },
     /// Clear cache entries
     Clear {
@@ -55,6 +52,13 @@ enum Commands {
     Log,
     /// Verify installation health
     Verify,
+    /// Export cache as JSON
+    Export,
+    /// Import cache from JSON file
+    Import {
+        /// Path to JSON file to import
+        file: String,
+    },
 }
 
 #[tokio::main]
@@ -62,16 +66,18 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Start => cli::start::run().await?,
-        Commands::Stop => cli::stop()?,
-        Commands::Status => cli::status()?,
-        Commands::Init { global } => cli::init::run(global).await?,
-        Commands::Stats { json } => cli::stats::run(json).await?,
-        Commands::Clear { older_than } => cli::clear::run(older_than).await?,
-        Commands::Config { key, value } => cli::config_cmd::run(key, value)?,
-        Commands::Test { prompt } => cli::test_cmd::run(prompt).await?,
-        Commands::Log => cli::log::run()?,
-        Commands::Verify => cli::verify::run()?,
+        Commands::Start => dja::cli::start::run().await?,
+        Commands::Stop => dja::cli::stop()?,
+        Commands::Status => dja::cli::status()?,
+        Commands::Init { global } => dja::cli::init::run(global).await?,
+        Commands::Stats { json, graph } => dja::cli::stats::run(json, graph).await?,
+        Commands::Clear { older_than } => dja::cli::clear::run(older_than).await?,
+        Commands::Config { key, value } => dja::cli::config_cmd::run(key, value)?,
+        Commands::Test { prompt } => dja::cli::test_cmd::run(prompt).await?,
+        Commands::Log => dja::cli::log::run()?,
+        Commands::Verify => dja::cli::verify::run()?,
+        Commands::Export => dja::cli::export::run().await?,
+        Commands::Import { file } => dja::cli::import::run(file).await?,
     }
 
     Ok(())

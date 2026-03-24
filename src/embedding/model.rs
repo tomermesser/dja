@@ -86,8 +86,8 @@ impl EmbeddingModel {
             }
         }
 
-        for dim in 0..hidden_size {
-            pooled[dim] /= mask_sum;
+        for val in &mut pooled {
+            *val /= mask_sum;
         }
 
         // L2 normalize

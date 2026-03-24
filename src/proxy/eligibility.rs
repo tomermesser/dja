@@ -51,10 +51,10 @@ pub fn check_eligibility(body: &[u8]) -> Option<ParsedRequest> {
 
     // Check for tool_result or tool_use blocks in any message's content
     for msg in messages {
-        if let Some(content) = msg.get("content") {
-            if has_tool_blocks(content) {
-                return None;
-            }
+        if let Some(content) = msg.get("content")
+            && has_tool_blocks(content)
+        {
+            return None;
         }
     }
 
@@ -64,7 +64,7 @@ pub fn check_eligibility(body: &[u8]) -> Option<ParsedRequest> {
     // Extract and hash system prompt
     let system_text = obj
         .get("system")
-        .and_then(|s| extract_system_text(s))
+        .and_then(extract_system_text)
         .unwrap_or_default();
     let system_hash = sha256_hex(&system_text);
 

@@ -69,14 +69,14 @@ fn append_to_shell_profile(port: u16) -> Result<()> {
     );
 
     // Check if already present
-    if let Ok(contents) = std::fs::read_to_string(&profile_path) {
-        if contents.contains("ANTHROPIC_BASE_URL") {
-            println!(
-                "ANTHROPIC_BASE_URL already set in {}. Skipping.",
-                profile_path.display()
-            );
-            return Ok(());
-        }
+    if let Ok(contents) = std::fs::read_to_string(&profile_path)
+        && contents.contains("ANTHROPIC_BASE_URL")
+    {
+        println!(
+            "ANTHROPIC_BASE_URL already set in {}. Skipping.",
+            profile_path.display()
+        );
+        return Ok(());
     }
 
     use std::io::Write;

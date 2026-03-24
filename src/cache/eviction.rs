@@ -27,6 +27,7 @@ impl CacheDb {
     /// Delete least-recently-used entries to keep total entries at or below `max_entries`.
     /// The count and delete are combined into a single atomic SQL statement.
     /// Returns the number of deleted entries.
+    #[allow(dead_code)]
     pub async fn evict_lru(&self, max_entries: u64) -> Result<u64> {
         let conn = self.conn.lock().await;
 
