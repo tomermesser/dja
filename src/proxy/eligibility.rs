@@ -1,0 +1,322 @@
+use sha2::{Digest, Sha256};
+
+/// A parsed request that has been determined eligible for caching.
+pub struct ParsedRequest {
+    pub user_message: String,
+    pub system_hash: String,
+    pub model: String,
+    pub is_streaming: bool,
+    pub full_body: bytes::Bytes,
+}
+
+/// Check if a request body is eligible for semantic caching.
+///
+/// Returns `Some(ParsedRequest)` if the request can be cached, `None` otherwise.
+/// See module-level docs for eligibility rules.
+pub fn check_eligibility(body: &[u8]) -> Option<ParsedRequest> {
+    let json: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let obj = json.as_object()?;
+
+    // Must have a messages array
+    let messages = obj.get("messages")?.as_array()?;
+
+    // Count user messages and collect them
+    let user_messages: Vec<&serde_json::Value> = messages
+        .iter()
+        .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+        .collect();
+
+    // Must have exactly one user message
+    if user_messages.len() != 1 {
+        return None;
+    }
+
+    // Check for assistant messages (multi-turn conversation)
+    let has_assistant = messages
+        .iter()
+        .any(|m| m.get("role").and_then(|r| r.as_str()) == Some("assistant"));
+    if has_assistant {
+        return None;
+    }
+
+    let user_msg = user_messages[0];
+    let content = user_msg.get("content")?;
+
+    // Extract text from content, handling both string and array forms
+    let user_text = extract_text_content(content)?;
+
+    if user_text.is_empty() {
+        return None;
+    }
+
+    // Check for tool_result or tool_use blocks in any message's content
+    for msg in messages {
+        if let Some(content) = msg.get("content") {
+            if has_tool_blocks(content) {
+                return None;
+            }
+        }
+    }
+
+    // Extract model
+    let model = obj.get("model")?.as_str()?.to_string();
+
+    // Extract and hash system prompt
+    let system_text = obj
+        .get("system")
+        .and_then(|s| extract_system_text(s))
+        .unwrap_or_default();
+    let system_hash = sha256_hex(&system_text);
+
+    // Check if streaming
+    let is_streaming = obj
+        .get("stream")
+        .and_then(|s| s.as_bool())
+        .unwrap_or(false);
+
+    Some(ParsedRequest {
+        user_message: user_text,
+        system_hash,
+        model,
+        is_streaming,
+        full_body: bytes::Bytes::copy_from_slice(body),
+    })
+}
+
+/// Extract text content from a message's content field.
+/// Handles both `"content": "string"` and `"content": [{"type": "text", "text": "..."}]`.
+fn extract_text_content(content: &serde_json::Value) -> Option<String> {
+    match content {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Array(blocks) => {
+            let texts: Vec<&str> = blocks
+                .iter()
+                .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                .collect();
+            if texts.is_empty() {
+                None
+            } else {
+                Some(texts.join("\n"))
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Extract text from the system field.
+/// Handles both `"system": "string"` and `"system": [{"type": "text", "text": "..."}]`.
+fn extract_system_text(system: &serde_json::Value) -> Option<String> {
+    match system {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Array(blocks) => {
+            let texts: Vec<&str> = blocks
+                .iter()
+                .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                .collect();
+            if texts.is_empty() {
+                None
+            } else {
+                Some(texts.join("\n"))
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Check if content contains tool_result or tool_use blocks.
+fn has_tool_blocks(content: &serde_json::Value) -> bool {
+    if let Some(blocks) = content.as_array() {
+        blocks.iter().any(|b| {
+            let block_type = b.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            block_type == "tool_result" || block_type == "tool_use"
+        })
+    } else {
+        false
+    }
+}
+
+fn sha256_hex(input: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_simple_eligible_request() {
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "messages": [
+                {"role": "user", "content": "What is Rust?"}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let parsed = check_eligibility(&bytes).expect("should be eligible");
+        assert_eq!(parsed.user_message, "What is Rust?");
+        assert_eq!(parsed.model, "claude-sonnet-4-20250514");
+        assert!(!parsed.is_streaming);
+    }
+
+    #[test]
+    fn test_eligible_with_system_prompt() {
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "system": "You are a helpful assistant.",
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let parsed = check_eligibility(&bytes).expect("should be eligible");
+        assert_eq!(parsed.user_message, "Hello");
+        // System hash should be consistent
+        let hash2 = sha256_hex("You are a helpful assistant.");
+        assert_eq!(parsed.system_hash, hash2);
+    }
+
+    #[test]
+    fn test_eligible_streaming() {
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "stream": true,
+            "messages": [
+                {"role": "user", "content": "Hi"}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let parsed = check_eligibility(&bytes).expect("should be eligible");
+        assert!(parsed.is_streaming);
+    }
+
+    #[test]
+    fn test_eligible_array_content() {
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "text", "text": "Hello world"}
+                ]}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let parsed = check_eligibility(&bytes).expect("should be eligible");
+        assert_eq!(parsed.user_message, "Hello world");
+    }
+
+    #[test]
+    fn test_ineligible_multi_turn() {
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi there!"},
+                {"role": "user", "content": "How are you?"}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        assert!(check_eligibility(&bytes).is_none(), "multi-turn should be ineligible");
+    }
+
+    #[test]
+    fn test_ineligible_tool_use() {
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "123", "content": "result"}
+                ]}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        assert!(check_eligibility(&bytes).is_none(), "tool_result should be ineligible");
+    }
+
+    #[test]
+    fn test_ineligible_no_messages() {
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-20250514"
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        assert!(check_eligibility(&bytes).is_none());
+    }
+
+    #[test]
+    fn test_ineligible_no_model() {
+        let body = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        assert!(check_eligibility(&bytes).is_none());
+    }
+
+    #[test]
+    fn test_ineligible_invalid_json() {
+        assert!(check_eligibility(b"not json").is_none());
+    }
+
+    #[test]
+    fn test_ineligible_multiple_user_messages_no_assistant() {
+        // Two user messages in a row (no assistant) — still not single-turn
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "user", "content": "World"}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        assert!(check_eligibility(&bytes).is_none());
+    }
+
+    #[test]
+    fn test_system_hash_absent_vs_empty() {
+        // No system field
+        let body1 = serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "messages": [{"role": "user", "content": "Hi"}]
+        });
+        let parsed1 = check_eligibility(&serde_json::to_vec(&body1).unwrap()).unwrap();
+
+        // The hash of an empty string should be used when system is absent
+        let empty_hash = sha256_hex("");
+        assert_eq!(parsed1.system_hash, empty_hash);
+    }
+
+    #[test]
+    fn test_tool_use_in_user_content_blocks() {
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "text", "text": "Here's some context"},
+                    {"type": "tool_use", "id": "123", "name": "get_weather", "input": {}}
+                ]}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        assert!(check_eligibility(&bytes).is_none(), "tool_use blocks should be ineligible");
+    }
+
+    #[test]
+    fn test_system_array_format() {
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "system": [
+                {"type": "text", "text": "You are helpful."},
+                {"type": "text", "text": "Be concise."}
+            ],
+            "messages": [{"role": "user", "content": "Hi"}]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let parsed = check_eligibility(&bytes).expect("should be eligible");
+        let expected_hash = sha256_hex("You are helpful.\nBe concise.");
+        assert_eq!(parsed.system_hash, expected_hash);
+    }
+}
