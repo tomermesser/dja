@@ -13,7 +13,7 @@ const MODEL_DIR_NAME: &str = "all-MiniLM-L6-v2";
 /// Known SHA-256 hashes for integrity verification.
 /// These are checked after download; a mismatch causes an error.
 const MODEL_ONNX_SHA256: &str =
-    "6fd5d72fe4589f189f8ebc006442dbb529bb7ce38f8082112682524616046452";
+    "06fd5d72fe4589f189f8ebc006442dbb529bb7ce38f8082112682524616046452";
 const TOKENIZER_JSON_SHA256: &str =
     "be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037";
 
@@ -30,10 +30,15 @@ pub async fn download_model() -> Result<PathBuf> {
     let model_path = model_dir.join("model.onnx");
     let tokenizer_path = model_dir.join("tokenizer.json");
 
-    // Check if both files already exist
+    // Check if both files already exist and pass integrity checks
     if model_path.exists() && tokenizer_path.exists() {
-        tracing::info!("Model already exists at {}", model_dir.display());
-        return Ok(model_dir);
+        let model_ok = verify_file_hash(&model_path, MODEL_ONNX_SHA256).await.unwrap_or(false);
+        let tokenizer_ok = verify_file_hash(&tokenizer_path, TOKENIZER_JSON_SHA256).await.unwrap_or(false);
+        if model_ok && tokenizer_ok {
+            tracing::info!("Model already exists and verified at {}", model_dir.display());
+            return Ok(model_dir);
+        }
+        tracing::warn!("Existing model files failed integrity check, re-downloading");
     }
 
     tokio::fs::create_dir_all(&model_dir)
@@ -50,6 +55,7 @@ pub async fn download_model() -> Result<PathBuf> {
 }
 
 /// Download a single file with progress reporting and SHA-256 verification.
+/// Uses an atomic write: writes to a `.tmp` file first, then renames on success.
 async fn download_file(url: &str, dest: &Path, expected_sha256: &str) -> Result<()> {
     use futures::StreamExt;
 
@@ -59,6 +65,34 @@ async fn download_file(url: &str, dest: &Path, expected_sha256: &str) -> Result<
         .unwrap_or_default();
 
     tracing::info!("Downloading {} …", filename);
+
+    let tmp_dest = dest.with_extension("tmp");
+
+    let result = download_file_inner(url, &filename, &tmp_dest, expected_sha256).await;
+
+    if let Err(e) = result {
+        // Clean up partial .tmp file on any error
+        let _ = tokio::fs::remove_file(&tmp_dest).await;
+        return Err(e);
+    }
+
+    // Atomic rename: only replace dest once download is verified
+    tokio::fs::rename(&tmp_dest, dest)
+        .await
+        .context("failed to rename tmp file to destination")?;
+
+    tracing::info!("{}: download complete, integrity verified", filename);
+    Ok(())
+}
+
+/// Inner download logic that writes to `tmp_dest`.
+async fn download_file_inner(
+    url: &str,
+    filename: &str,
+    tmp_dest: &Path,
+    expected_sha256: &str,
+) -> Result<()> {
+    use futures::StreamExt;
 
     let client = reqwest::Client::new();
     let response = client
@@ -77,9 +111,9 @@ async fn download_file(url: &str, dest: &Path, expected_sha256: &str) -> Result<
 
     let total_size = response.content_length();
     let mut stream = response.bytes_stream();
-    let mut file = tokio::fs::File::create(dest)
+    let mut file = tokio::fs::File::create(tmp_dest)
         .await
-        .context("failed to create file")?;
+        .context("failed to create tmp file")?;
 
     let mut downloaded: u64 = 0;
     let mut hasher = Sha256::new();
@@ -106,18 +140,24 @@ async fn download_file(url: &str, dest: &Path, expected_sha256: &str) -> Result<
 
     file.flush().await?;
 
-    // SHA-256 integrity check
-    let hash = format!("{:x}", hasher.finalize());
+    // SHA-256 integrity check — use {:064x} to always produce a 64-char lowercase hex string
+    let hash = format!("{:064x}", hasher.finalize());
     if hash != expected_sha256 {
-        // Remove the corrupt file
-        let _ = tokio::fs::remove_file(dest).await;
         bail!(
             "SHA-256 mismatch for {filename}: expected {expected_sha256}, got {hash}"
         );
     }
 
-    tracing::info!("{}: download complete, integrity verified", filename);
     Ok(())
+}
+
+/// Compute the SHA-256 hash of an existing file and compare to expected.
+async fn verify_file_hash(path: &Path, expected_sha256: &str) -> Result<bool> {
+    let bytes = tokio::fs::read(path).await.context("failed to read file for hash verification")?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let hash = format!("{:064x}", hasher.finalize());
+    Ok(hash == expected_sha256)
 }
 
 #[cfg(test)]

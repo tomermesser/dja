@@ -51,7 +51,7 @@ impl EmbeddingModel {
 
         let outputs = self
             .session
-            .run(ort::inputs![input_ids, attention_mask, token_type_ids])
+            .run(ort::inputs!["input_ids" => input_ids, "attention_mask" => attention_mask, "token_type_ids" => token_type_ids])
             .map_err(|e| anyhow::anyhow!("{e}"))
             .context("ONNX inference failed")?;
 
@@ -62,6 +62,11 @@ impl EmbeddingModel {
             .context("failed to extract output tensor")?;
 
         let hidden_size = shape[2] as usize;
+        anyhow::ensure!(hidden_size == 384, "expected 384-dim model, got {hidden_size}");
+
+        // Bounds check before flat tensor indexing
+        let expected_len = seq_len * hidden_size;
+        anyhow::ensure!(data.len() >= expected_len, "unexpected output tensor size");
 
         // Mean pooling: average token embeddings, masked by attention mask
         let mut pooled = vec![0.0f32; hidden_size];
