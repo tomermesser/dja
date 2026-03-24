@@ -30,12 +30,27 @@ pub fn stop() -> Result<()> {
 
     // Send SIGTERM
     let result = unsafe { libc::kill(pid, libc::SIGTERM) };
-    if result == 0 {
-        println!("Sent stop signal to dja (PID {pid}).");
-        // Give it a moment, then clean PID file if still present
-        fs::remove_file(&pid_path).ok();
-    } else {
+    if result != 0 {
         anyhow::bail!("Failed to send stop signal to PID {pid}");
+    }
+
+    println!("Sent stop signal to dja (PID {pid}).");
+
+    // Poll up to 3 seconds to confirm the process has exited.
+    let mut exited = false;
+    for _ in 0..30 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let alive = unsafe { libc::kill(pid, 0) == 0 };
+        if !alive {
+            exited = true;
+            break;
+        }
+    }
+
+    if exited {
+        println!("dja stopped.");
+    } else {
+        println!("dja did not exit within 3 seconds; it may still be shutting down.");
     }
 
     Ok(())

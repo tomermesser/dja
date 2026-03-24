@@ -42,7 +42,7 @@ pub async fn forward_request(
     let method = req.method().clone();
 
     // Collect the request body.
-    let body_bytes = axum::body::to_bytes(req.into_body(), usize::MAX).await?;
+    let body_bytes = axum::body::to_bytes(req.into_body(), 10 * 1024 * 1024).await?;
 
     // Build the upstream request.
     let upstream_req = state

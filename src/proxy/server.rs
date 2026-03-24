@@ -17,8 +17,9 @@ pub async fn run(config: Config, shutdown: impl Future<Output = ()> + Send + 'st
     let addr = format!("127.0.0.1:{}", config.port);
 
     let http_client = reqwest::Client::builder()
-        .build()
-        .expect("failed to build HTTP client");
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
 
     let state = Arc::new(AppState {
         config,
