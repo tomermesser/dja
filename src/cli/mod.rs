@@ -1,4 +1,11 @@
+pub mod clear;
+pub mod config_cmd;
+pub mod init;
+pub mod log;
 pub mod start;
+pub mod stats;
+pub mod test_cmd;
+pub mod verify;
 
 use crate::config::Config;
 use anyhow::{Context, Result};
