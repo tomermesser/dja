@@ -1,6 +1,7 @@
 use crate::proxy::eligibility;
 use crate::proxy::forward;
 use crate::proxy::server::AppState;
+use crate::proxy::stream;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{Method, Request, Response};
@@ -24,7 +25,7 @@ pub async fn proxy_handler(
     let is_messages_post = method == Method::POST && req.uri().path() == "/v1/messages";
 
     let response = if is_messages_post {
-        handle_messages_request(&state, req).await
+        handle_messages_request(Arc::clone(&state), req).await
     } else {
         forward::forward_request(&state, req).await
     };
@@ -62,7 +63,7 @@ pub async fn proxy_handler(
 
 /// Handle a POST /v1/messages request with semantic caching.
 async fn handle_messages_request(
-    state: &AppState,
+    state: Arc<AppState>,
     req: Request<Body>,
 ) -> anyhow::Result<Response<Body>> {
     // Read the request body first so we can inspect it
@@ -76,7 +77,7 @@ async fn handle_messages_request(
             tracing::debug!("cache SKIP: request not eligible");
             // Reconstruct the request and forward normally
             let req = Request::from_parts(parts, Body::from(body_bytes));
-            return forward::forward_request(state, req).await;
+            return forward::forward_request(&state, req).await;
         }
     };
 
@@ -86,7 +87,7 @@ async fn handle_messages_request(
         Err(e) => {
             tracing::warn!(error = %e, "cache ERROR: embedding failed, falling back to forward");
             let req = Request::from_parts(parts, Body::from(body_bytes));
-            return forward::forward_request(state, req).await;
+            return forward::forward_request(&state, req).await;
         }
     };
 
@@ -100,7 +101,7 @@ async fn handle_messages_request(
         Err(e) => {
             tracing::warn!(error = %e, "cache ERROR: lookup failed, falling back to forward");
             let req = Request::from_parts(parts, Body::from(body_bytes));
-            return forward::forward_request(state, req).await;
+            return forward::forward_request(&state, req).await;
         }
     };
 
@@ -115,60 +116,121 @@ async fn handle_messages_request(
                 "cache HIT"
             );
 
-            let content_type = if parsed.is_streaming {
-                "text/event-stream"
+            if parsed.is_streaming {
+                // Stream cached SSE events with [cached] marker
+                let body = stream::replay_cached_response(hit.response_data, true);
+                Ok(Response::builder()
+                    .status(200)
+                    .header("content-type", "text/event-stream")
+                    .body(body)
+                    .expect("building cached streaming response"))
             } else {
-                "application/json"
-            };
-
-            Ok(Response::builder()
-                .status(200)
-                .header("content-type", content_type)
-                .body(Body::from(hit.response_data))
-                .expect("building cached response"))
+                // Non-streaming: inject [cached] marker into JSON
+                let modified = stream::inject_cached_marker_json(&hit.response_data);
+                Ok(Response::builder()
+                    .status(200)
+                    .header("content-type", "application/json")
+                    .body(Body::from(modified))
+                    .expect("building cached response"))
+            }
         }
         None => {
             // Cache MISS
             let snippet: String = parsed.user_message.chars().take(80).collect();
             tracing::info!(prompt_snippet = %snippet, "cache MISS");
 
-            // Forward to upstream
-            let req = Request::from_parts(parts, Body::from(body_bytes));
-            let (response, response_bytes) =
-                forward::forward_with_body(state, req, parsed.full_body).await?;
+            if parsed.is_streaming {
+                // Streaming cache miss: tee the stream to client + buffer for cache
+                let req = Request::from_parts(parts, Body::from(body_bytes));
+                let (upstream_resp, response_builder) =
+                    forward::forward_raw(&state, req, parsed.full_body).await?;
 
-            // Only cache successful responses within size limits
-            let status = response.status();
-            let response_size = response_bytes.len();
+                let status = upstream_resp.status();
+                let (body, buffer_rx) = stream::tee_stream(upstream_resp);
+                let response = response_builder.body(body)?;
 
-            if status.is_success() && response_size <= state.config.max_response_size {
-                // Store in cache (fire-and-forget error handling)
-                if let Err(e) = state
-                    .cache
-                    .store(
-                        &parsed.user_message,
-                        &parsed.system_hash,
-                        &parsed.model,
-                        &embedding,
-                        &response_bytes,
-                    )
-                    .await
-                {
-                    tracing::warn!(error = %e, "cache ERROR: failed to store response");
-                } else {
-                    tracing::debug!(response_size, "cached response stored");
+                // Spawn background task to cache the response once streaming completes
+                if status.is_success() {
+                    let state = Arc::clone(&state);
+                    let user_message = parsed.user_message;
+                    let system_hash = parsed.system_hash;
+                    let model = parsed.model;
+
+                    tokio::spawn(async move {
+                        let max_response_size = state.config.max_response_size;
+                        match buffer_rx.await {
+                            Ok(buffer) => {
+                                let response_size = buffer.len();
+                                if response_size <= max_response_size {
+                                    if let Err(e) = state
+                                        .cache
+                                        .store(
+                                            &user_message,
+                                            &system_hash,
+                                            &model,
+                                            &embedding,
+                                            &buffer,
+                                        )
+                                        .await
+                                    {
+                                        tracing::warn!(error = %e, "cache ERROR: failed to store streamed response");
+                                    } else {
+                                        tracing::debug!(response_size, "cached streamed response stored");
+                                    }
+                                } else {
+                                    tracing::debug!(
+                                        response_size,
+                                        max = max_response_size,
+                                        "not caching oversized streamed response"
+                                    );
+                                }
+                            }
+                            Err(_) => {
+                                tracing::warn!("cache ERROR: stream buffer channel closed before completion");
+                            }
+                        }
+                    });
                 }
-            } else if !status.is_success() {
-                tracing::debug!(status = %status, "not caching non-success response");
-            } else {
-                tracing::debug!(
-                    response_size,
-                    max = state.config.max_response_size,
-                    "not caching oversized response"
-                );
-            }
 
-            Ok(response)
+                Ok(response)
+            } else {
+                // Non-streaming cache miss: buffer entire response
+                let req = Request::from_parts(parts, Body::from(body_bytes));
+                let (response, response_bytes) =
+                    forward::forward_with_body(&state, req, parsed.full_body).await?;
+
+                let status = response.status();
+                let response_size = response_bytes.len();
+
+                if status.is_success() && response_size <= state.config.max_response_size {
+                    // Store in cache (fire-and-forget error handling)
+                    if let Err(e) = state
+                        .cache
+                        .store(
+                            &parsed.user_message,
+                            &parsed.system_hash,
+                            &parsed.model,
+                            &embedding,
+                            &response_bytes,
+                        )
+                        .await
+                    {
+                        tracing::warn!(error = %e, "cache ERROR: failed to store response");
+                    } else {
+                        tracing::debug!(response_size, "cached response stored");
+                    }
+                } else if !status.is_success() {
+                    tracing::debug!(status = %status, "not caching non-success response");
+                } else {
+                    tracing::debug!(
+                        response_size,
+                        max = state.config.max_response_size,
+                        "not caching oversized response"
+                    );
+                }
+
+                Ok(response)
+            }
         }
     }
 }

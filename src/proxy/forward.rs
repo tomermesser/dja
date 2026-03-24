@@ -95,10 +95,66 @@ pub async fn forward_request(
     }
 }
 
+/// Forward a request with a pre-read body to upstream, returning the raw
+/// reqwest::Response and a pre-built axum response builder (with status + headers).
+///
+/// This allows the caller to decide how to consume the response (streaming vs buffered).
+pub async fn forward_raw(
+    state: &AppState,
+    req: Request<Body>,
+    body_bytes: Bytes,
+) -> Result<(reqwest::Response, axum::http::response::Builder)> {
+    let upstream_url = format!(
+        "{}{}",
+        state.config.upstream.trim_end_matches('/'),
+        req.uri().path_and_query().map(|pq| pq.to_string()).unwrap_or_default()
+    );
+
+    // Build upstream headers, passing through everything except hop-by-hop.
+    let mut upstream_headers = HeaderMap::new();
+    for (name, value) in req.headers() {
+        let name_str = name.as_str().to_lowercase();
+        if HOP_BY_HOP_HEADERS.contains(&name_str.as_str()) {
+            continue;
+        }
+        upstream_headers.insert(name.clone(), value.clone());
+    }
+
+    let method = req.method().clone();
+
+    let upstream_req = state
+        .http_client
+        .request(method, &upstream_url)
+        .headers(upstream_headers)
+        .body(body_bytes);
+
+    let upstream_resp = upstream_req.send().await?;
+
+    let status = upstream_resp.status();
+    let resp_headers = upstream_resp.headers().clone();
+
+    let mut response_builder = Response::builder().status(status.as_u16());
+
+    for (name, value) in &resp_headers {
+        let name_str = name.as_str().to_lowercase();
+        if HOP_BY_HOP_HEADERS.contains(&name_str.as_str()) {
+            continue;
+        }
+        if let (Ok(n), Ok(v)) = (
+            HeaderName::from_bytes(name.as_str().as_bytes()),
+            HeaderValue::from_bytes(value.as_bytes()),
+        ) {
+            response_builder = response_builder.header(n, v);
+        }
+    }
+
+    Ok((upstream_resp, response_builder))
+}
+
 /// Forward a request with a pre-read body to upstream, returning both the
 /// response and the buffered response body bytes (for caching).
 ///
-/// The response body is always fully buffered (streaming optimization deferred to Task 5).
+/// The response body is always fully buffered (used for non-streaming requests).
 pub async fn forward_with_body(
     state: &AppState,
     req: Request<Body>,
@@ -152,7 +208,7 @@ pub async fn forward_with_body(
         }
     }
 
-    // Always buffer the full response (streaming optimization in Task 5).
+    // Buffer the full response (non-streaming requests only; streaming uses forward_raw + tee_stream).
     let response_bytes = upstream_resp.bytes().await?;
     let response = response_builder.body(Body::from(response_bytes.clone()))?;
 
