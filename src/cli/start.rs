@@ -1,0 +1,110 @@
+use crate::config::Config;
+use crate::proxy;
+use anyhow::{Context, Result};
+use std::fs;
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::EnvFilter;
+
+/// Initialize tracing with both console and file output.
+fn init_logging(config: &Config) -> Result<WorkerGuard> {
+    Config::ensure_data_dir()?;
+
+    let log_path = Config::log_path();
+    let log_dir = log_path.parent().expect("log path has parent");
+    let log_filename = log_path.file_name().expect("log path has filename");
+
+    let file_appender = tracing_appender::rolling::never(log_dir, log_filename);
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+
+    let filter = EnvFilter::try_new(&config.log_level)
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer().with_target(false))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_ansi(false)
+                .with_writer(non_blocking),
+        )
+        .init();
+
+    Ok(guard)
+}
+
+/// Write the current process PID to the PID file.
+fn write_pid_file() -> Result<()> {
+    Config::ensure_data_dir()?;
+    let pid = std::process::id();
+    let pid_path = Config::pid_path();
+    fs::write(&pid_path, pid.to_string())
+        .with_context(|| format!("writing PID file {}", pid_path.display()))?;
+    Ok(())
+}
+
+/// Remove the PID file on shutdown.
+fn remove_pid_file() {
+    let pid_path = Config::pid_path();
+    fs::remove_file(&pid_path).ok();
+}
+
+/// Check if a daemon is already running, cleaning stale PID files.
+fn check_already_running() -> Result<bool> {
+    let pid_path = Config::pid_path();
+    if !pid_path.exists() {
+        return Ok(false);
+    }
+
+    let pid_str = fs::read_to_string(&pid_path).context("reading PID file")?;
+    let pid: i32 = match pid_str.trim().parse() {
+        Ok(p) => p,
+        Err(_) => {
+            // Invalid PID file — remove it
+            fs::remove_file(&pid_path).ok();
+            return Ok(false);
+        }
+    };
+
+    let alive = unsafe { libc::kill(pid, 0) == 0 };
+    if alive {
+        Ok(true)
+    } else {
+        // Stale PID file
+        fs::remove_file(&pid_path).ok();
+        Ok(false)
+    }
+}
+
+/// Main entry point for the `start` subcommand.
+pub async fn run() -> Result<()> {
+    let config = Config::load()?;
+
+    if check_already_running()? {
+        anyhow::bail!("dja is already running. Use `dja stop` first.");
+    }
+
+    // Keep the guard alive for the duration of the process so logs flush.
+    let _log_guard = init_logging(&config)?;
+
+    write_pid_file()?;
+
+    tracing::info!("dja starting on 127.0.0.1:{}", config.port);
+
+    // Set up graceful shutdown — remove PID file on Ctrl-C / SIGTERM.
+    let shutdown = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to listen for ctrl-c");
+        tracing::info!("Shutdown signal received");
+    };
+
+    let result = proxy::server::run(config, shutdown).await;
+
+    remove_pid_file();
+    tracing::info!("dja stopped");
+
+    result
+}
