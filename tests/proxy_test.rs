@@ -195,11 +195,8 @@ async fn test_proxy_non_streaming_cache_hit() {
     let body2: serde_json::Value = resp2.json().await.unwrap();
     let text2 = body2["content"][0]["text"].as_str().unwrap();
 
-    // Should have [cached] marker
-    assert!(
-        text2.starts_with("[cached]"),
-        "Expected [cached] marker, got: {text2}"
-    );
+    // Cached response should have the same text (marker injection disabled to avoid parsing issues)
+    assert_eq!(text2, "Hello from mock!", "Cached response text should match original");
 
     // Mock should NOT have been called a second time
     assert_eq!(
@@ -301,10 +298,10 @@ async fn test_proxy_streaming_cache_hit() {
 
     let mock_count = mock_state.request_count.load(Ordering::SeqCst);
 
-    // Should have [cached] marker in the SSE stream
+    // Cached response should contain the original text (marker injection disabled)
     assert!(
-        body_text2.contains("[cached]"),
-        "Expected [cached] marker in SSE stream (mock called {mock_count} times), got: {body_text2}"
+        body_text2.contains("Hello from mock!"),
+        "Expected original text in cached SSE stream (mock called {mock_count} times), got: {body_text2}"
     );
 
     // Mock should NOT have been called again

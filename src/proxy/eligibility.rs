@@ -114,6 +114,11 @@ pub fn check_eligibility(body: &[u8], multi_turn: bool) -> Option<ParsedRequest>
 
 /// Extract text content from a message's content field.
 /// Handles both `"content": "string"` and `"content": [{"type": "text", "text": "..."}]`.
+///
+/// For array content, returns only the **last non-system-reminder text block**.
+/// Claude Code embeds dynamic `<system-reminder>` blocks as text content blocks
+/// in the user message. These change every session and would poison the cache key.
+/// The actual user question is always the last text block.
 fn extract_text_content(content: &serde_json::Value) -> Option<String> {
     match content {
         serde_json::Value::String(s) => Some(s.clone()),
@@ -123,11 +128,14 @@ fn extract_text_content(content: &serde_json::Value) -> Option<String> {
                 .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
                 .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
                 .collect();
-            if texts.is_empty() {
-                None
-            } else {
-                Some(texts.join("\n"))
-            }
+            // Take the last text block that isn't a system-reminder.
+            // Fall back to the very last text block if all are system-reminders.
+            texts
+                .iter()
+                .rev()
+                .find(|t| !t.trim_start().starts_with("<system-reminder>"))
+                .or_else(|| texts.last())
+                .map(|s| s.to_string())
         }
         _ => None,
     }
@@ -399,6 +407,24 @@ mod tests {
         let bytes = serde_json::to_vec(&body).unwrap();
         let parsed = check_eligibility(&bytes, true).expect("multi-turn with tool blocks should be eligible");
         assert_eq!(parsed.user_message, "What about tomorrow?");
+    }
+
+    #[test]
+    fn test_extracts_last_non_system_reminder_text_block() {
+        // Claude Code embeds <system-reminder> as text blocks in user content.
+        // We should extract only the actual user question (last non-system-reminder block).
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "text", "text": "<system-reminder>\nDynamic session context that changes\n</system-reminder>"},
+                    {"type": "text", "text": "How are you today?"}
+                ]}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let parsed = check_eligibility(&bytes, true).expect("should be eligible");
+        assert_eq!(parsed.user_message, "How are you today?");
     }
 
     #[test]

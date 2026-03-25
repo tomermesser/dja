@@ -174,23 +174,30 @@ async fn handle_messages_request(
                 "cache HIT"
             );
 
-            if parsed.is_streaming {
-                // Stream cached SSE events with [cached] marker
-                let body = stream::replay_cached_response(hit.response_data, true);
-                Ok(Response::builder()
-                    .status(200)
-                    .header("content-type", "text/event-stream")
-                    .body(body)
-                    .expect("building cached streaming response"))
+            // Return cached response bytes as-is.
+            // Upstream API sends gzip-compressed responses, so the stored bytes
+            // are gzip-compressed. We must include content-encoding: gzip so the
+            // client can decompress them.
+            let content_type = if parsed.is_streaming {
+                "text/event-stream"
             } else {
-                // Non-streaming: inject [cached] marker into JSON
-                let modified = stream::inject_cached_marker_json(&hit.response_data);
-                Ok(Response::builder()
-                    .status(200)
-                    .header("content-type", "application/json")
-                    .body(Body::from(modified))
-                    .expect("building cached response"))
+                "application/json"
+            };
+            let mut builder = Response::builder()
+                .status(200)
+                .header("content-type", content_type);
+
+            // Check if stored data looks gzip-compressed (magic bytes 1f 8b)
+            if hit.response_data.len() >= 2
+                && hit.response_data[0] == 0x1f
+                && hit.response_data[1] == 0x8b
+            {
+                builder = builder.header("content-encoding", "gzip");
             }
+
+            Ok(builder
+                .body(Body::from(hit.response_data))
+                .expect("building cached response"))
         }
         None => {
             // Cache MISS
