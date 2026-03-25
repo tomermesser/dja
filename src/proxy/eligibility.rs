@@ -12,8 +12,17 @@ pub struct ParsedRequest {
 /// Check if a request body is eligible for semantic caching.
 ///
 /// Returns `Some(ParsedRequest)` if the request can be cached, `None` otherwise.
-/// See module-level docs for eligibility rules.
-pub fn check_eligibility(body: &[u8]) -> Option<ParsedRequest> {
+///
+/// The cache key is the **last user message** only — prior conversation context
+/// (earlier user/assistant turns) is intentionally ignored. The similarity
+/// threshold (default 0.95) protects against false cache matches even when the
+/// same question appears in different conversational contexts.
+///
+/// The `multi_turn` parameter controls whether multi-turn conversations are
+/// eligible for caching. When `true`, any conversation whose last message is
+/// from the user is eligible. When `false`, only single-turn requests (exactly
+/// one user message and no assistant messages) are eligible.
+pub fn check_eligibility(body: &[u8], multi_turn: bool) -> Option<ParsedRequest> {
     let json: serde_json::Value = serde_json::from_slice(body).ok()?;
     let obj = json.as_object()?;
 
@@ -23,6 +32,18 @@ pub fn check_eligibility(body: &[u8]) -> Option<ParsedRequest> {
     // Must have at least one message
     if messages.is_empty() {
         return None;
+    }
+
+    // When multi-turn caching is disabled, enforce single-turn only:
+    // exactly one message, and it must be from the user.
+    if !multi_turn {
+        if messages.len() != 1 {
+            return None;
+        }
+        let only_msg = &messages[0];
+        if only_msg.get("role").and_then(|r| r.as_str()) != Some("user") {
+            return None;
+        }
     }
 
     // Last message must be from the user
@@ -143,7 +164,7 @@ mod tests {
             ]
         });
         let bytes = serde_json::to_vec(&body).unwrap();
-        let parsed = check_eligibility(&bytes).expect("should be eligible");
+        let parsed = check_eligibility(&bytes, true).expect("should be eligible");
         assert_eq!(parsed.user_message, "What is Rust?");
         assert_eq!(parsed.model, "claude-sonnet-4-20250514");
         assert!(!parsed.is_streaming);
@@ -159,7 +180,7 @@ mod tests {
             ]
         });
         let bytes = serde_json::to_vec(&body).unwrap();
-        let parsed = check_eligibility(&bytes).expect("should be eligible");
+        let parsed = check_eligibility(&bytes, true).expect("should be eligible");
         assert_eq!(parsed.user_message, "Hello");
         // System hash should be consistent
         let hash2 = sha256_hex("You are a helpful assistant.");
@@ -176,7 +197,7 @@ mod tests {
             ]
         });
         let bytes = serde_json::to_vec(&body).unwrap();
-        let parsed = check_eligibility(&bytes).expect("should be eligible");
+        let parsed = check_eligibility(&bytes, true).expect("should be eligible");
         assert!(parsed.is_streaming);
     }
 
@@ -191,7 +212,7 @@ mod tests {
             ]
         });
         let bytes = serde_json::to_vec(&body).unwrap();
-        let parsed = check_eligibility(&bytes).expect("should be eligible");
+        let parsed = check_eligibility(&bytes, true).expect("should be eligible");
         assert_eq!(parsed.user_message, "Hello world");
     }
 
@@ -206,7 +227,7 @@ mod tests {
             ]
         });
         let bytes = serde_json::to_vec(&body).unwrap();
-        let parsed = check_eligibility(&bytes).expect("multi-turn should be eligible");
+        let parsed = check_eligibility(&bytes, true).expect("multi-turn should be eligible");
         assert_eq!(parsed.user_message, "How are you?");
     }
 
@@ -221,7 +242,7 @@ mod tests {
             ]
         });
         let bytes = serde_json::to_vec(&body).unwrap();
-        assert!(check_eligibility(&bytes).is_none(), "tool_result should be ineligible");
+        assert!(check_eligibility(&bytes, true).is_none(), "tool_result should be ineligible");
     }
 
     #[test]
@@ -230,7 +251,7 @@ mod tests {
             "model": "claude-sonnet-4-20250514"
         });
         let bytes = serde_json::to_vec(&body).unwrap();
-        assert!(check_eligibility(&bytes).is_none());
+        assert!(check_eligibility(&bytes, true).is_none());
     }
 
     #[test]
@@ -241,12 +262,12 @@ mod tests {
             ]
         });
         let bytes = serde_json::to_vec(&body).unwrap();
-        assert!(check_eligibility(&bytes).is_none());
+        assert!(check_eligibility(&bytes, true).is_none());
     }
 
     #[test]
     fn test_ineligible_invalid_json() {
-        assert!(check_eligibility(b"not json").is_none());
+        assert!(check_eligibility(b"not json", true).is_none());
     }
 
     #[test]
@@ -260,7 +281,7 @@ mod tests {
             ]
         });
         let bytes = serde_json::to_vec(&body).unwrap();
-        let parsed = check_eligibility(&bytes).expect("should be eligible");
+        let parsed = check_eligibility(&bytes, true).expect("should be eligible");
         assert_eq!(parsed.user_message, "World");
     }
 
@@ -275,7 +296,7 @@ mod tests {
             ]
         });
         let bytes = serde_json::to_vec(&body).unwrap();
-        let parsed = check_eligibility(&bytes).expect("should be eligible");
+        let parsed = check_eligibility(&bytes, true).expect("should be eligible");
         assert_eq!(parsed.user_message, "Second question");
     }
 
@@ -292,7 +313,7 @@ mod tests {
             ]
         });
         let bytes = serde_json::to_vec(&body).unwrap();
-        assert!(check_eligibility(&bytes).is_none(), "tool_result in last message should be ineligible");
+        assert!(check_eligibility(&bytes, true).is_none(), "tool_result in last message should be ineligible");
     }
 
     #[test]
@@ -305,7 +326,7 @@ mod tests {
             ]
         });
         let bytes = serde_json::to_vec(&body).unwrap();
-        assert!(check_eligibility(&bytes).is_none(), "last message is assistant, should be ineligible");
+        assert!(check_eligibility(&bytes, true).is_none(), "last message is assistant, should be ineligible");
     }
 
     #[test]
@@ -315,7 +336,7 @@ mod tests {
             "model": "claude-sonnet-4-20250514",
             "messages": [{"role": "user", "content": "Hi"}]
         });
-        let parsed1 = check_eligibility(&serde_json::to_vec(&body1).unwrap()).unwrap();
+        let parsed1 = check_eligibility(&serde_json::to_vec(&body1).unwrap(), true).unwrap();
 
         // The hash of an empty string should be used when system is absent
         let empty_hash = sha256_hex("");
@@ -334,7 +355,7 @@ mod tests {
             ]
         });
         let bytes = serde_json::to_vec(&body).unwrap();
-        assert!(check_eligibility(&bytes).is_none(), "tool_use blocks should be ineligible");
+        assert!(check_eligibility(&bytes, true).is_none(), "tool_use blocks should be ineligible");
     }
 
     #[test]
@@ -348,8 +369,54 @@ mod tests {
             "messages": [{"role": "user", "content": "Hi"}]
         });
         let bytes = serde_json::to_vec(&body).unwrap();
-        let parsed = check_eligibility(&bytes).expect("should be eligible");
+        let parsed = check_eligibility(&bytes, true).expect("should be eligible");
         let expected_hash = sha256_hex("You are helpful.\nBe concise.");
         assert_eq!(parsed.system_hash, expected_hash);
+    }
+
+    #[test]
+    fn test_multi_turn_disabled_rejects_multi_turn() {
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi there!"},
+                {"role": "user", "content": "How are you?"}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        assert!(
+            check_eligibility(&bytes, false).is_none(),
+            "multi-turn should be ineligible when multi_turn=false"
+        );
+    }
+
+    #[test]
+    fn test_multi_turn_disabled_allows_single_turn() {
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "messages": [
+                {"role": "user", "content": "What is Rust?"}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let parsed = check_eligibility(&bytes, false).expect("single-turn should be eligible when multi_turn=false");
+        assert_eq!(parsed.user_message, "What is Rust?");
+    }
+
+    #[test]
+    fn test_multi_turn_disabled_rejects_multiple_user_messages() {
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "user", "content": "World"}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        assert!(
+            check_eligibility(&bytes, false).is_none(),
+            "multiple messages should be ineligible when multi_turn=false"
+        );
     }
 }

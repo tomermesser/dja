@@ -71,7 +71,7 @@ async fn handle_messages_request(
     let body_bytes = axum::body::to_bytes(body, 10 * 1024 * 1024).await?;
 
     // Check eligibility
-    let parsed = match eligibility::check_eligibility(&body_bytes) {
+    let parsed = match eligibility::check_eligibility(&body_bytes, state.config.multi_turn_caching) {
         Some(parsed) => parsed,
         None => {
             tracing::debug!("cache SKIP: request not eligible");
