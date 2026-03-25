@@ -24,6 +24,9 @@ pub struct Config {
     /// Set to true if your system prompts are stable across sessions.
     /// Default false (best for Claude Code, which has dynamic system prompts).
     pub match_system_prompt: bool,
+    /// Whether to enable multi-turn caching (cache based on last user message).
+    /// Default true.
+    pub multi_turn_caching: bool,
 }
 
 impl Default for Config {
@@ -37,6 +40,7 @@ impl Default for Config {
             max_response_size: 102400,
             log_level: "info".to_string(),
             match_system_prompt: false,
+            multi_turn_caching: true,
         }
     }
 }
@@ -171,5 +175,20 @@ mod tests {
         "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(config.match_system_prompt);
+    }
+
+    #[test]
+    fn test_default_multi_turn_caching_is_true() {
+        let config = Config::default();
+        assert!(config.multi_turn_caching);
+    }
+
+    #[test]
+    fn test_parse_multi_turn_caching_false() {
+        let toml_str = r#"
+            multi_turn_caching = false
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(!config.multi_turn_caching);
     }
 }

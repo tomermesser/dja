@@ -20,42 +20,29 @@ pub fn check_eligibility(body: &[u8]) -> Option<ParsedRequest> {
     // Must have a messages array
     let messages = obj.get("messages")?.as_array()?;
 
-    // Count user messages and collect them
-    let user_messages: Vec<&serde_json::Value> = messages
-        .iter()
-        .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
-        .collect();
-
-    // Must have exactly one user message
-    if user_messages.len() != 1 {
+    // Must have at least one message
+    if messages.is_empty() {
         return None;
     }
 
-    // Check for assistant messages (multi-turn conversation)
-    let has_assistant = messages
-        .iter()
-        .any(|m| m.get("role").and_then(|r| r.as_str()) == Some("assistant"));
-    if has_assistant {
+    // Last message must be from the user
+    let last_msg = messages.last()?;
+    if last_msg.get("role").and_then(|r| r.as_str()) != Some("user") {
         return None;
     }
 
-    let user_msg = user_messages[0];
-    let content = user_msg.get("content")?;
+    let content = last_msg.get("content")?;
+
+    // Check for tool_result or tool_use blocks in the last user message
+    if has_tool_blocks(content) {
+        return None;
+    }
 
     // Extract text from content, handling both string and array forms
     let user_text = extract_text_content(content)?;
 
     if user_text.is_empty() {
         return None;
-    }
-
-    // Check for tool_result or tool_use blocks in any message's content
-    for msg in messages {
-        if let Some(content) = msg.get("content")
-            && has_tool_blocks(content)
-        {
-            return None;
-        }
     }
 
     // Extract model
@@ -209,7 +196,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ineligible_multi_turn() {
+    fn test_eligible_multi_turn() {
         let body = serde_json::json!({
             "model": "claude-sonnet-4-20250514",
             "messages": [
@@ -219,7 +206,8 @@ mod tests {
             ]
         });
         let bytes = serde_json::to_vec(&body).unwrap();
-        assert!(check_eligibility(&bytes).is_none(), "multi-turn should be ineligible");
+        let parsed = check_eligibility(&bytes).expect("multi-turn should be eligible");
+        assert_eq!(parsed.user_message, "How are you?");
     }
 
     #[test]
@@ -262,8 +250,8 @@ mod tests {
     }
 
     #[test]
-    fn test_ineligible_multiple_user_messages_no_assistant() {
-        // Two user messages in a row (no assistant) — still not single-turn
+    fn test_eligible_multiple_user_messages() {
+        // Two user messages in a row — last user message is used
         let body = serde_json::json!({
             "model": "claude-sonnet-4-20250514",
             "messages": [
@@ -272,7 +260,52 @@ mod tests {
             ]
         });
         let bytes = serde_json::to_vec(&body).unwrap();
-        assert!(check_eligibility(&bytes).is_none());
+        let parsed = check_eligibility(&bytes).expect("should be eligible");
+        assert_eq!(parsed.user_message, "World");
+    }
+
+    #[test]
+    fn test_multi_turn_extracts_last_user_message() {
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "messages": [
+                {"role": "user", "content": "First question"},
+                {"role": "assistant", "content": "First answer"},
+                {"role": "user", "content": "Second question"}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let parsed = check_eligibility(&bytes).expect("should be eligible");
+        assert_eq!(parsed.user_message, "Second question");
+    }
+
+    #[test]
+    fn test_multi_turn_rejects_tool_use_in_last_message() {
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi!"},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "123", "content": "result"}
+                ]}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        assert!(check_eligibility(&bytes).is_none(), "tool_result in last message should be ineligible");
+    }
+
+    #[test]
+    fn test_multi_turn_rejects_if_last_message_not_user() {
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi there!"}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        assert!(check_eligibility(&bytes).is_none(), "last message is assistant, should be ineligible");
     }
 
     #[test]

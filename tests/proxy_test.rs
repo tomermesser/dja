@@ -130,6 +130,7 @@ async fn test_proxy_non_streaming_cache_hit() {
         max_response_size: 102400,
         log_level: "debug".to_string(),
         match_system_prompt: false,
+        multi_turn_caching: true,
     };
 
     // Set up proxy
@@ -235,6 +236,7 @@ async fn test_proxy_streaming_cache_hit() {
         max_response_size: 102400,
         log_level: "debug".to_string(),
         match_system_prompt: false,
+        multi_turn_caching: true,
     };
 
     let state = std::sync::Arc::new(dja::proxy::server::AppState {
