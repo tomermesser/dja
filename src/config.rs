@@ -20,6 +20,10 @@ pub struct Config {
     pub max_response_size: usize,
     /// Log level
     pub log_level: String,
+    /// Whether to require system_hash match in cache lookups.
+    /// Set to true if your system prompts are stable across sessions.
+    /// Default false (best for Claude Code, which has dynamic system prompts).
+    pub match_system_prompt: bool,
 }
 
 impl Default for Config {
@@ -32,6 +36,7 @@ impl Default for Config {
             max_entries: 10000,
             max_response_size: 102400,
             log_level: "info".to_string(),
+            match_system_prompt: false,
         }
     }
 }
@@ -151,5 +156,20 @@ mod tests {
         assert_eq!(config.max_entries, 5000);
         assert_eq!(config.max_response_size, 50000);
         assert_eq!(config.log_level, "debug");
+    }
+
+    #[test]
+    fn test_default_match_system_prompt_is_false() {
+        let config = Config::default();
+        assert!(!config.match_system_prompt);
+    }
+
+    #[test]
+    fn test_parse_match_system_prompt_true() {
+        let toml_str = r#"
+            match_system_prompt = true
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.match_system_prompt);
     }
 }
