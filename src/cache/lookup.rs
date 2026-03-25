@@ -21,6 +21,7 @@ impl CacheDb {
         system_hash: &str,
         model: &str,
         threshold: f32,
+        match_system_prompt: bool,
     ) -> Result<Option<CacheHit>> {
         let embedding_json = format!(
             "[{}]",
@@ -41,13 +42,23 @@ impl CacheDb {
         // Use vector_top_k with k=10 so the WHERE clause on system_hash/model can
         // filter candidates; k=1 would miss valid matches if the globally nearest
         // neighbor belongs to a different system/model.
+        let query = if match_system_prompt {
+            "SELECT c.id, c.prompt_text, c.response_data,
+                    vector_distance_cos(c.embedding, vector32(?1)) AS dist
+             FROM vector_top_k('cache_vec_idx', vector32(?1), 10) AS v
+             JOIN cache AS c ON c.rowid = v.id
+             WHERE c.system_hash = ?2 AND c.model = ?3"
+        } else {
+            "SELECT c.id, c.prompt_text, c.response_data,
+                    vector_distance_cos(c.embedding, vector32(?1)) AS dist
+             FROM vector_top_k('cache_vec_idx', vector32(?1), 10) AS v
+             JOIN cache AS c ON c.rowid = v.id
+             WHERE c.model = ?3"
+        };
+
         let mut rows = conn
             .query(
-                "SELECT c.id, c.prompt_text, c.response_data,
-                        vector_distance_cos(c.embedding, vector32(?1)) AS dist
-                 FROM vector_top_k('cache_vec_idx', vector32(?1), 10) AS v
-                 JOIN cache AS c ON c.rowid = v.id
-                 WHERE c.system_hash = ?2 AND c.model = ?3",
+                query,
                 libsql::params![embedding_json, system_hash, model],
             )
             .await

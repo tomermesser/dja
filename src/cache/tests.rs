@@ -49,7 +49,7 @@ async fn test_lookup_no_match() {
 
     // Empty database should return None
     let hit = db
-        .lookup(&emb, "sys123", "gpt-4", 0.95)
+        .lookup(&emb, "sys123", "gpt-4", 0.95, true)
         .await
         .expect("lookup failed");
     assert!(hit.is_none());
@@ -67,7 +67,7 @@ async fn test_store_and_lookup_hit() {
 
     // Same embedding should be a perfect match
     let hit = db
-        .lookup(&emb, "syshash", "gpt-4", 0.95)
+        .lookup(&emb, "syshash", "gpt-4", 0.95, true)
         .await
         .expect("lookup failed");
     let hit = hit.expect("Expected a cache hit");
@@ -90,7 +90,7 @@ async fn test_lookup_wrong_model_no_hit() {
 
     // Different model should not match
     let hit = db
-        .lookup(&emb, "syshash", "claude-3", 0.95)
+        .lookup(&emb, "syshash", "claude-3", 0.95, true)
         .await
         .expect("lookup failed");
     assert!(hit.is_none());
@@ -107,7 +107,7 @@ async fn test_lookup_wrong_system_hash_no_hit() {
 
     // Different system_hash should not match
     let hit = db
-        .lookup(&emb, "hash_b", "gpt-4", 0.95)
+        .lookup(&emb, "hash_b", "gpt-4", 0.95, true)
         .await
         .expect("lookup failed");
     assert!(hit.is_none());
@@ -220,6 +220,48 @@ async fn test_stats_functions() {
     assert_eq!(db.total_hits().await.unwrap(), 0);
 
     // Trigger a hit
-    db.lookup(&emb1, "sys", "gpt-4", 0.95).await.unwrap();
+    db.lookup(&emb1, "sys", "gpt-4", 0.95, true).await.unwrap();
     assert_eq!(db.total_hits().await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn test_lookup_ignores_system_hash_when_disabled() {
+    let db = CacheDb::open_in_memory().await.expect("open failed");
+    let emb = make_embedding(1.0);
+
+    db.store("prompt", "hash_a", "gpt-4", &emb, b"cached data")
+        .await
+        .unwrap();
+
+    // Different system_hash, but match_system_prompt = false → should still hit
+    let hit = db
+        .lookup(&emb, "hash_b", "gpt-4", 0.95, false)
+        .await
+        .expect("lookup failed");
+    assert!(hit.is_some(), "should hit when match_system_prompt is false");
+    assert_eq!(hit.unwrap().prompt_text, "prompt");
+}
+
+#[tokio::test]
+async fn test_lookup_respects_system_hash_when_enabled() {
+    let db = CacheDb::open_in_memory().await.expect("open failed");
+    let emb = make_embedding(1.0);
+
+    db.store("prompt", "hash_a", "gpt-4", &emb, b"cached data")
+        .await
+        .unwrap();
+
+    // Different system_hash, match_system_prompt = true → should miss
+    let hit = db
+        .lookup(&emb, "hash_b", "gpt-4", 0.95, true)
+        .await
+        .expect("lookup failed");
+    assert!(hit.is_none(), "should miss when match_system_prompt is true");
+
+    // Same system_hash, match_system_prompt = true → should hit
+    let hit = db
+        .lookup(&emb, "hash_a", "gpt-4", 0.95, true)
+        .await
+        .expect("lookup failed");
+    assert!(hit.is_some(), "should hit with matching system_hash");
 }

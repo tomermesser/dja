@@ -94,7 +94,7 @@ async fn handle_messages_request(
     // Search cache
     let cache_result = match state
         .cache
-        .lookup(&embedding, &parsed.system_hash, &parsed.model, state.config.threshold as f32)
+        .lookup(&embedding, &parsed.system_hash, &parsed.model, state.config.threshold as f32, state.config.match_system_prompt)
         .await
     {
         Ok(result) => result,

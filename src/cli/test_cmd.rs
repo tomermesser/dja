@@ -40,7 +40,7 @@ pub async fn run(prompt: String) -> Result<()> {
 
     // Use a dummy system_hash and model for testing lookups
     let result = db
-        .lookup(&embedding, "", "", config.threshold as f32)
+        .lookup(&embedding, "", "", config.threshold as f32, config.match_system_prompt)
         .await?;
 
     match result {
