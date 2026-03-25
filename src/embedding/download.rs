@@ -13,7 +13,7 @@ const MODEL_DIR_NAME: &str = "all-MiniLM-L6-v2";
 /// Known SHA-256 hashes for integrity verification.
 /// These are checked after download; a mismatch causes an error.
 const MODEL_ONNX_SHA256: &str =
-    "06fd5d72fe4589f189f8ebc006442dbb529bb7ce38f8082112682524616046452";
+    "6fd5d72fe4589f189f8ebc006442dbb529bb7ce38f8082112682524616046452";
 const TOKENIZER_JSON_SHA256: &str =
     "be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037";
 

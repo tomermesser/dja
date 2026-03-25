@@ -29,8 +29,21 @@ pub fn check_eligibility(body: &[u8], multi_turn: bool) -> Option<ParsedRequest>
     // Must have a messages array
     let messages = obj.get("messages")?.as_array()?;
 
+    // Diagnostic: log message count and roles for debugging
+    let roles: Vec<&str> = messages
+        .iter()
+        .filter_map(|m| m.get("role").and_then(|r| r.as_str()))
+        .collect();
+    tracing::debug!(
+        message_count = messages.len(),
+        roles = ?roles,
+        multi_turn_enabled = multi_turn,
+        "eligibility check"
+    );
+
     // Must have at least one message
     if messages.is_empty() {
+        tracing::debug!("SKIP: no messages");
         return None;
     }
 
@@ -38,6 +51,7 @@ pub fn check_eligibility(body: &[u8], multi_turn: bool) -> Option<ParsedRequest>
     // exactly one message, and it must be from the user.
     if !multi_turn {
         if messages.len() != 1 {
+            tracing::debug!("SKIP: multi-turn disabled and {} messages", messages.len());
             return None;
         }
         let only_msg = &messages[0];
@@ -48,14 +62,20 @@ pub fn check_eligibility(body: &[u8], multi_turn: bool) -> Option<ParsedRequest>
 
     // Last message must be from the user
     let last_msg = messages.last()?;
-    if last_msg.get("role").and_then(|r| r.as_str()) != Some("user") {
+    let last_role = last_msg.get("role").and_then(|r| r.as_str());
+    if last_role != Some("user") {
+        tracing::debug!(last_role = ?last_role, "SKIP: last message is not user");
         return None;
     }
 
     let content = last_msg.get("content")?;
 
-    // Check for tool_result or tool_use blocks in the last user message
-    if has_tool_blocks(content) {
+    // For single-turn requests, reject if tool blocks are present (safety).
+    // For multi-turn, allow tool blocks — Claude Code's displayed-response
+    // request includes tool_result blocks alongside the user's text question.
+    // extract_text_content() only extracts "type": "text" blocks, so tool
+    // blocks are naturally ignored during cache key extraction.
+    if !multi_turn && has_tool_blocks(content) {
         return None;
     }
 
@@ -63,6 +83,7 @@ pub fn check_eligibility(body: &[u8], multi_turn: bool) -> Option<ParsedRequest>
     let user_text = extract_text_content(content)?;
 
     if user_text.is_empty() {
+        tracing::debug!("SKIP: empty user text");
         return None;
     }
 
@@ -344,7 +365,8 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_use_in_user_content_blocks() {
+    fn test_tool_use_in_user_content_blocks_single_turn() {
+        // Single-turn: tool blocks in user message → rejected
         let body = serde_json::json!({
             "model": "claude-sonnet-4-20250514",
             "messages": [
@@ -355,7 +377,28 @@ mod tests {
             ]
         });
         let bytes = serde_json::to_vec(&body).unwrap();
-        assert!(check_eligibility(&bytes, true).is_none(), "tool_use blocks should be ineligible");
+        assert!(check_eligibility(&bytes, false).is_none(), "single-turn tool_use should be ineligible");
+    }
+
+    #[test]
+    fn test_tool_blocks_allowed_in_multi_turn() {
+        // Multi-turn: tool blocks in last user message → allowed, text extracted
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "messages": [
+                {"role": "user", "content": "First question"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "123", "name": "get_weather", "input": {}}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "123", "content": "sunny"},
+                    {"type": "text", "text": "What about tomorrow?"}
+                ]}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let parsed = check_eligibility(&bytes, true).expect("multi-turn with tool blocks should be eligible");
+        assert_eq!(parsed.user_message, "What about tomorrow?");
     }
 
     #[test]

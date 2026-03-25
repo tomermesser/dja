@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="icon.webp" width="180" alt="dja logo" />
+</p>
+
 # dja
 
 A semantic cache proxy for AI coding tools. dja sits between your coding assistant (e.g., Claude Code) and the Anthropic API, transparently caching responses. When the same (or semantically similar) prompt is sent again, dja returns the cached response instantly, saving time and API costs.

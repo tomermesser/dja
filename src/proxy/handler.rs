@@ -70,11 +70,69 @@ async fn handle_messages_request(
     let (parts, body) = req.into_parts();
     let body_bytes = axum::body::to_bytes(body, 10 * 1024 * 1024).await?;
 
+    // Log request structure for debugging
+    let body_size = body_bytes.len();
+    match serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+        Ok(json) => {
+            if let Some(messages) = json.get("messages").and_then(|m| m.as_array()) {
+                let roles: Vec<&str> = messages
+                    .iter()
+                    .filter_map(|m| m.get("role").and_then(|r| r.as_str()))
+                    .collect();
+                let last_role = roles.last().copied().unwrap_or("none");
+
+                // Detailed inspection of last message content
+                let (last_has_tool, last_content_type) = if let Some(last_msg) = messages.last() {
+                    if let Some(content) = last_msg.get("content") {
+                        match content {
+                            serde_json::Value::String(_) => {
+                                (false, "string")
+                            }
+                            serde_json::Value::Array(blocks) => {
+                                let has_tool = blocks.iter().any(|b| {
+                                    let t = b.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                    t == "tool_result" || t == "tool_use"
+                                });
+                                let types: Vec<&str> = blocks
+                                    .iter()
+                                    .filter_map(|b| b.get("type").and_then(|t| t.as_str()))
+                                    .collect();
+                                (has_tool, if has_tool { "array_with_tools" } else { "array" })
+                            }
+                            _ => (false, "other"),
+                        }
+                    } else {
+                        (false, "no_content")
+                    }
+                } else {
+                    (false, "no_messages")
+                };
+
+                tracing::info!(
+                    message_count = messages.len(),
+                    roles = ?roles,
+                    last_role = last_role,
+                    last_has_tool_blocks = last_has_tool,
+                    last_content_type = last_content_type,
+                    body_size,
+                    "request structure"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                body_size,
+                "failed to parse request JSON"
+            );
+        }
+    }
+
     // Check eligibility
     let parsed = match eligibility::check_eligibility(&body_bytes, state.config.multi_turn_caching) {
         Some(parsed) => parsed,
         None => {
-            tracing::debug!("cache SKIP: request not eligible");
+            tracing::info!("cache SKIP: request not eligible");
             // Reconstruct the request and forward normally
             let req = Request::from_parts(parts, Body::from(body_bytes));
             return forward::forward_request(&state, req).await;
