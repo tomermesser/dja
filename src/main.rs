@@ -59,6 +59,8 @@ enum Commands {
         /// Path to JSON file to import
         file: String,
     },
+    /// Open live TUI dashboard
+    Monitor,
 }
 
 #[tokio::main]
@@ -78,6 +80,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Verify => dja::cli::verify::run()?,
         Commands::Export => dja::cli::export::run().await?,
         Commands::Import { file } => dja::cli::import::run(file).await?,
+        Commands::Monitor => dja::cli::monitor::run().await?,
     }
 
     Ok(())

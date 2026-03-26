@@ -4,6 +4,7 @@ pub mod export;
 pub mod import;
 pub mod init;
 pub mod log;
+pub mod monitor;
 pub mod start;
 pub mod stats;
 pub mod test_cmd;
