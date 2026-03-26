@@ -134,11 +134,14 @@ async fn test_proxy_non_streaming_cache_hit() {
     };
 
     // Set up proxy
+    let (event_tx, _rx) = dja::proxy::metrics::event_channel();
     let state = std::sync::Arc::new(dja::proxy::server::AppState {
         config,
         http_client: reqwest::Client::new(),
         embedding: tokio::sync::Mutex::new(embedding_model),
         cache,
+        stats: dja::proxy::metrics::SessionStats::new(),
+        event_tx,
     });
 
     let app = axum::Router::new()
@@ -236,11 +239,14 @@ async fn test_proxy_streaming_cache_hit() {
         multi_turn_caching: true,
     };
 
+    let (event_tx, _rx) = dja::proxy::metrics::event_channel();
     let state = std::sync::Arc::new(dja::proxy::server::AppState {
         config,
         http_client: reqwest::Client::new(),
         embedding: tokio::sync::Mutex::new(embedding_model),
         cache,
+        stats: dja::proxy::metrics::SessionStats::new(),
+        event_tx,
     });
 
     let app = axum::Router::new()

@@ -2,12 +2,15 @@ use crate::cache::CacheDb;
 use crate::config::Config;
 use crate::embedding::EmbeddingModel;
 use crate::proxy::handler;
+use crate::proxy::internal;
+use crate::proxy::metrics::{self, SessionStats};
 use anyhow::{Context, Result};
+use axum::routing::get;
 use axum::Router;
 use std::future::Future;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, Mutex};
 
 /// Shared state available to all handlers.
 pub struct AppState {
@@ -15,6 +18,8 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub embedding: Mutex<EmbeddingModel>,
     pub cache: CacheDb,
+    pub stats: SessionStats,
+    pub event_tx: broadcast::Sender<metrics::RequestEvent>,
 }
 
 /// Start the proxy server and run until the shutdown signal fires.
@@ -38,14 +43,20 @@ pub async fn run(config: Config, shutdown: impl Future<Output = ()> + Send + 'st
         .with_context(|| format!("Failed to open cache database at {}", db_path.display()))?;
     tracing::info!("Opened cache database at {}", db_path.display());
 
+    let (event_tx, _rx) = metrics::event_channel();
+
     let state = Arc::new(AppState {
         config,
         http_client,
         embedding: Mutex::new(embedding_model),
         cache,
+        stats: SessionStats::new(),
+        event_tx,
     });
 
     let app = Router::new()
+        .route("/internal/stats", get(internal::stats_handler))
+        .route("/internal/events", get(internal::events_handler))
         .fallback(handler::proxy_handler)
         .with_state(state);
 

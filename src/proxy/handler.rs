@@ -1,5 +1,6 @@
 use crate::proxy::eligibility;
 use crate::proxy::forward;
+use crate::proxy::metrics::{self, RequestEvent};
 use crate::proxy::server::AppState;
 use crate::proxy::stream;
 use axum::body::Body;
@@ -25,7 +26,7 @@ pub async fn proxy_handler(
     let is_messages_post = method == Method::POST && req.uri().path() == "/v1/messages";
 
     let response = if is_messages_post {
-        handle_messages_request(Arc::clone(&state), req).await
+        handle_messages_request(Arc::clone(&state), req, start).await
     } else {
         forward::forward_request(&state, req).await
     };
@@ -65,6 +66,7 @@ pub async fn proxy_handler(
 async fn handle_messages_request(
     state: Arc<AppState>,
     req: Request<Body>,
+    start: Instant,
 ) -> anyhow::Result<Response<Body>> {
     // Read the request body first so we can inspect it
     let (parts, body) = req.into_parts();
@@ -133,6 +135,18 @@ async fn handle_messages_request(
         Some(parsed) => parsed,
         None => {
             tracing::info!("cache SKIP: request not eligible");
+            state.stats.record_skip();
+            let _ = state.event_tx.send(RequestEvent {
+                event_type: "skip".to_string(),
+                latency_ms: Some(start.elapsed().as_millis() as u64),
+                prompt_snippet: None,
+                model: None,
+                similarity: None,
+                cache_id: None,
+                body_size,
+                response_size: None,
+                timestamp: metrics::now_iso8601(),
+            });
             // Reconstruct the request and forward normally
             let req = Request::from_parts(parts, Body::from(body_bytes));
             return forward::forward_request(&state, req).await;
@@ -144,6 +158,18 @@ async fn handle_messages_request(
         Ok(emb) => emb,
         Err(e) => {
             tracing::warn!(error = %e, "cache ERROR: embedding failed, falling back to forward");
+            state.stats.record_error();
+            let _ = state.event_tx.send(RequestEvent {
+                event_type: "error".to_string(),
+                latency_ms: Some(start.elapsed().as_millis() as u64),
+                prompt_snippet: Some(parsed.user_message.chars().take(80).collect()),
+                model: Some(parsed.model.clone()),
+                similarity: None,
+                cache_id: None,
+                body_size,
+                response_size: None,
+                timestamp: metrics::now_iso8601(),
+            });
             let req = Request::from_parts(parts, Body::from(body_bytes));
             return forward::forward_request(&state, req).await;
         }
@@ -158,6 +184,18 @@ async fn handle_messages_request(
         Ok(result) => result,
         Err(e) => {
             tracing::warn!(error = %e, "cache ERROR: lookup failed, falling back to forward");
+            state.stats.record_error();
+            let _ = state.event_tx.send(RequestEvent {
+                event_type: "error".to_string(),
+                latency_ms: Some(start.elapsed().as_millis() as u64),
+                prompt_snippet: Some(parsed.user_message.chars().take(80).collect()),
+                model: Some(parsed.model.clone()),
+                similarity: None,
+                cache_id: None,
+                body_size,
+                response_size: None,
+                timestamp: metrics::now_iso8601(),
+            });
             let req = Request::from_parts(parts, Body::from(body_bytes));
             return forward::forward_request(&state, req).await;
         }
@@ -167,6 +205,8 @@ async fn handle_messages_request(
         Some(hit) => {
             // Cache HIT
             let snippet: String = parsed.user_message.chars().take(80).collect();
+            let latency_ms = start.elapsed().as_millis() as u64;
+            let response_size = hit.response_data.len();
             tracing::info!(
                 similarity = hit.similarity,
                 prompt_snippet = %snippet,
@@ -174,10 +214,20 @@ async fn handle_messages_request(
                 "cache HIT"
             );
 
+            state.stats.record_hit(latency_ms, body_size, response_size);
+            let _ = state.event_tx.send(RequestEvent {
+                event_type: "hit".to_string(),
+                latency_ms: Some(latency_ms),
+                prompt_snippet: Some(snippet),
+                model: Some(parsed.model.clone()),
+                similarity: Some(hit.similarity),
+                cache_id: Some(hit.id),
+                body_size,
+                response_size: Some(response_size),
+                timestamp: metrics::now_iso8601(),
+            });
+
             // Return cached response bytes as-is.
-            // Upstream API sends gzip-compressed responses, so the stored bytes
-            // are gzip-compressed. We must include content-encoding: gzip so the
-            // client can decompress them.
             let content_type = if parsed.is_streaming {
                 "text/event-stream"
             } else {
@@ -202,7 +252,24 @@ async fn handle_messages_request(
         None => {
             // Cache MISS
             let snippet: String = parsed.user_message.chars().take(80).collect();
+            let latency_ms = start.elapsed().as_millis() as u64;
             tracing::info!(prompt_snippet = %snippet, "cache MISS");
+
+            // Note: we record miss latency after the full upstream round-trip,
+            // but we send the event now with the current latency. The actual
+            // upstream latency will be captured in the proxied request log.
+            state.stats.record_miss(latency_ms);
+            let _ = state.event_tx.send(RequestEvent {
+                event_type: "miss".to_string(),
+                latency_ms: Some(latency_ms),
+                prompt_snippet: Some(snippet),
+                model: Some(parsed.model.clone()),
+                similarity: None,
+                cache_id: None,
+                body_size,
+                response_size: None,
+                timestamp: metrics::now_iso8601(),
+            });
 
             if parsed.is_streaming {
                 // Streaming cache miss: tee the stream to client + buffer for cache
