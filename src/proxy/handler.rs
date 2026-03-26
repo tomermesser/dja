@@ -95,7 +95,7 @@ async fn handle_messages_request(
                                     let t = b.get("type").and_then(|t| t.as_str()).unwrap_or("");
                                     t == "tool_result" || t == "tool_use"
                                 });
-                                let types: Vec<&str> = blocks
+                                let _types: Vec<&str> = blocks
                                     .iter()
                                     .filter_map(|b| b.get("type").and_then(|t| t.as_str()))
                                     .collect();
@@ -138,14 +138,14 @@ async fn handle_messages_request(
             state.stats.record_skip();
             let _ = state.event_tx.send(RequestEvent {
                 event_type: "skip".to_string(),
-                latency_ms: Some(start.elapsed().as_millis() as u64),
+                latency_ms: None,
                 prompt_snippet: None,
                 model: None,
                 similarity: None,
                 cache_id: None,
                 body_size,
                 response_size: None,
-                timestamp: metrics::now_iso8601(),
+                timestamp: metrics::now_timestamp(),
             });
             // Reconstruct the request and forward normally
             let req = Request::from_parts(parts, Body::from(body_bytes));
@@ -168,7 +168,7 @@ async fn handle_messages_request(
                 cache_id: None,
                 body_size,
                 response_size: None,
-                timestamp: metrics::now_iso8601(),
+                timestamp: metrics::now_timestamp(),
             });
             let req = Request::from_parts(parts, Body::from(body_bytes));
             return forward::forward_request(&state, req).await;
@@ -194,7 +194,7 @@ async fn handle_messages_request(
                 cache_id: None,
                 body_size,
                 response_size: None,
-                timestamp: metrics::now_iso8601(),
+                timestamp: metrics::now_timestamp(),
             });
             let req = Request::from_parts(parts, Body::from(body_bytes));
             return forward::forward_request(&state, req).await;
@@ -224,7 +224,7 @@ async fn handle_messages_request(
                 cache_id: Some(hit.id),
                 body_size,
                 response_size: Some(response_size),
-                timestamp: metrics::now_iso8601(),
+                timestamp: metrics::now_timestamp(),
             });
 
             // Return cached response bytes as-is.
@@ -268,7 +268,7 @@ async fn handle_messages_request(
                 cache_id: None,
                 body_size,
                 response_size: None,
-                timestamp: metrics::now_iso8601(),
+                timestamp: metrics::now_timestamp(),
             });
 
             if parsed.is_streaming {

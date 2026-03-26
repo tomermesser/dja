@@ -47,7 +47,7 @@ impl SessionStats {
 
     /// Record a cache hit. Computes estimated time saved using average miss
     /// latency (defaults to 1000ms if no misses recorded yet).
-    pub fn record_hit(&self, _latency_ms: u64, body_size: usize, response_size: usize) {
+    pub fn record_hit(&self, latency_ms: u64, body_size: usize, response_size: usize) {
         self.hits.fetch_add(1, Ordering::Relaxed);
         self.upstream_bytes_saved
             .fetch_add(body_size as u64, Ordering::Relaxed);
@@ -61,7 +61,7 @@ impl SessionStats {
             1000
         };
         self.time_saved_ms
-            .fetch_add(avg_miss_latency, Ordering::Relaxed);
+            .fetch_add(avg_miss_latency.saturating_sub(latency_ms), Ordering::Relaxed);
     }
 
     /// Record a cache miss.
@@ -107,8 +107,8 @@ pub fn event_channel() -> (broadcast::Sender<RequestEvent>, broadcast::Receiver<
     (tx, rx)
 }
 
-/// Current time as a simple ISO-8601-ish Unix timestamp string.
-pub fn now_iso8601() -> String {
+/// Current time as a Unix epoch seconds string.
+pub fn now_timestamp() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
