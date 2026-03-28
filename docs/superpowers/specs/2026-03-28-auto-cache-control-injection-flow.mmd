@@ -1,0 +1,39 @@
+%%{init: {'theme': 'dark', 'themeVariables': {'primaryColor': '#6ee7b7', 'primaryTextColor': '#0a0a0f', 'lineColor': '#8888a0', 'secondaryColor': '#a78bfa', 'tertiaryColor': '#1a1a26'}}}%%
+flowchart TD
+    A["POST /v1/messages arrives"] --> B["Parse body bytes"]
+    B --> C{"check_eligibility()"}
+
+    C -- "INELIGIBLE<br/>(tool-only, no text, etc.)" --> D["maybe_inject_cache_control()"]
+    D --> E["forward_request() to Anthropic API"]
+
+    C -- "ELIGIBLE" --> F["Embed user message<br/>(ONNX all-MiniLM-L6-v2)"]
+    F --> G["Cache lookup<br/>(cosine similarity >= 0.95)"]
+
+    G -- "HIT" --> H["Return cached response<br/>(no API call, no injection needed)"]
+
+    G -- "MISS" --> I["maybe_inject_cache_control()"]
+    I --> J{"Streaming?"}
+
+    J -- "Yes" --> K["forward_raw() + tee_stream()<br/>Client receives SSE in real-time"]
+    J -- "No" --> L["forward_with_body()<br/>Buffer full response"]
+
+    K --> M["Store response in semantic cache<br/>(background task)"]
+    L --> M
+
+    subgraph inject ["cache_control::inject_cache_control()"]
+        direction TB
+        I1["Parse JSON body"] --> I2{"Count existing<br/>cache_control breakpoints"}
+        I2 -- ">= 4 slots used" --> I3["Return None<br/>(forward original bytes)"]
+        I2 -- "< 4 slots used" --> I4{"System prompt<br/>exists & unmarked?"}
+        I4 -- "Yes" --> I5["Inject cache_control<br/>on last system block<br/>(convert string -> array if needed)"]
+        I5 --> I6{"Tools exist<br/>& unmarked & slots left?"}
+        I4 -- "No" --> I6
+        I6 -- "Yes" --> I7["Inject cache_control<br/>on last tool definition"]
+        I6 -- "No" --> I8["Return modified bytes<br/>or None if nothing injected"]
+        I7 --> I8
+    end
+
+    style H fill:#6ee7b7,color:#0a0a0f
+    style inject fill:#1a1a26,stroke:#a78bfa,stroke-width:2px
+    style I3 fill:#2a2a3a,color:#8888a0
+    style I8 fill:#6ee7b7,color:#0a0a0f
