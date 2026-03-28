@@ -7,8 +7,12 @@ use futures::TryStreamExt;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
 /// Headers that should NOT be forwarded (hop-by-hop headers).
+/// `content-length` is excluded here so that reqwest can compute the correct
+/// value from the actual body bytes (important when the body has been modified
+/// by cache_control injection before forwarding).
 const HOP_BY_HOP_HEADERS: &[&str] = &[
     "connection",
+    "content-length",
     "keep-alive",
     "proxy-authenticate",
     "proxy-authorization",

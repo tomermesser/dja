@@ -100,6 +100,61 @@ async fn start_mock_server() -> (String, Arc<MockState>) {
     (url, state)
 }
 
+/// Mock state that also captures the last received request body for inspection.
+struct CapturingMockState {
+    request_count: AtomicU32,
+    last_body: tokio::sync::Mutex<Option<serde_json::Value>>,
+}
+
+async fn capturing_mock_handler(
+    axum::extract::State(state): axum::extract::State<Arc<CapturingMockState>>,
+    req: Request<Body>,
+) -> Response<Body> {
+    state.request_count.fetch_add(1, Ordering::SeqCst);
+
+    let body_bytes = axum::body::to_bytes(req.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    *state.last_body.lock().await = Some(body_json);
+
+    let response_json = serde_json::json!({
+        "id": "msg_mock_inject",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-sonnet-4-20250514",
+        "content": [{"type": "text", "text": "Injected!"}],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 10, "output_tokens": 3}
+    });
+    Response::builder()
+        .status(200)
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&response_json).unwrap()))
+        .unwrap()
+}
+
+async fn start_capturing_mock_server() -> (String, Arc<CapturingMockState>) {
+    let state = Arc::new(CapturingMockState {
+        request_count: AtomicU32::new(0),
+        last_body: tokio::sync::Mutex::new(None),
+    });
+
+    let app = axum::Router::new()
+        .route("/v1/messages", axum::routing::post(capturing_mock_handler))
+        .with_state(Arc::clone(&state));
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("http://127.0.0.1:{}", addr.port());
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    (url, state)
+}
+
 #[tokio::test]
 async fn test_proxy_non_streaming_cache_hit() {
     // Start mock Anthropic server
@@ -317,5 +372,186 @@ async fn test_proxy_streaming_cache_hit() {
         mock_count,
         1,
         "Mock was called again; streaming response should have come from cache"
+    );
+}
+
+#[tokio::test]
+async fn test_cache_control_injected_on_miss() {
+    let (mock_url, mock_state) = start_capturing_mock_server().await;
+
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let db_path = tmp_dir.path().join("cache.db");
+    let cache = dja::cache::CacheDb::open(&db_path).await.unwrap();
+
+    let model_dir = dja::embedding::download::default_model_dir().unwrap();
+    if !model_dir.join("model.onnx").exists() {
+        eprintln!("Skipping: embedding model not downloaded. Run `dja init` first.");
+        return;
+    }
+    let embedding_model = dja::embedding::EmbeddingModel::load(&model_dir).unwrap();
+
+    let config = dja::config::Config {
+        port: 0,
+        upstream: mock_url.clone(),
+        threshold: 0.95,
+        ttl: "30d".to_string(),
+        max_entries: 10000,
+        max_response_size: 102400,
+        log_level: "debug".to_string(),
+        match_system_prompt: false,
+        multi_turn_caching: true,
+        auto_cache_control: true,
+    };
+
+    let (event_tx, _rx) = dja::proxy::metrics::event_channel();
+    let state = std::sync::Arc::new(dja::proxy::server::AppState {
+        config,
+        http_client: reqwest::Client::new(),
+        embedding: tokio::sync::Mutex::new(embedding_model),
+        cache,
+        stats: dja::proxy::metrics::SessionStats::new(),
+        event_tx,
+    });
+
+    let app = axum::Router::new()
+        .fallback(dja::proxy::handler::proxy_handler)
+        .with_state(state);
+
+    let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+    let proxy_url = format!("http://127.0.0.1:{}", proxy_addr.port());
+
+    tokio::spawn(async move {
+        axum::serve(proxy_listener, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+
+    let request_body = serde_json::json!({
+        "model": "claude-sonnet-4-20250514",
+        "system": "You are a concise assistant.",
+        "tools": [
+            {
+                "name": "get_time",
+                "description": "Get the current time",
+                "input_schema": {"type": "object", "properties": {}}
+            }
+        ],
+        "messages": [{"role": "user", "content": "What time is it?"}]
+    });
+
+    let resp = client
+        .post(format!("{proxy_url}/v1/messages"))
+        .header("content-type", "application/json")
+        .header("x-api-key", "test-key")
+        .json(&request_body)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(mock_state.request_count.load(Ordering::SeqCst), 1);
+
+    let received = mock_state.last_body.lock().await;
+    let received_json = received.as_ref().expect("mock should have received a request");
+
+    // System should now be an array with cache_control on the last block
+    let system = received_json.get("system").expect("system field must be present");
+    assert!(system.is_array(), "system should be converted to array by injection");
+    let system_blocks = system.as_array().unwrap();
+    assert!(
+        system_blocks.last().unwrap().get("cache_control").is_some(),
+        "last system block must have cache_control injected"
+    );
+
+    // Last tool should have cache_control
+    let tools = received_json
+        .get("tools")
+        .expect("tools field must be present")
+        .as_array()
+        .unwrap();
+    assert!(
+        tools.last().unwrap().get("cache_control").is_some(),
+        "last tool must have cache_control injected"
+    );
+}
+
+#[tokio::test]
+async fn test_cache_control_not_injected_when_disabled() {
+    let (mock_url, mock_state) = start_capturing_mock_server().await;
+
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let db_path = tmp_dir.path().join("cache.db");
+    let cache = dja::cache::CacheDb::open(&db_path).await.unwrap();
+
+    let model_dir = dja::embedding::download::default_model_dir().unwrap();
+    if !model_dir.join("model.onnx").exists() {
+        eprintln!("Skipping: embedding model not downloaded. Run `dja init` first.");
+        return;
+    }
+    let embedding_model = dja::embedding::EmbeddingModel::load(&model_dir).unwrap();
+
+    let config = dja::config::Config {
+        port: 0,
+        upstream: mock_url.clone(),
+        threshold: 0.95,
+        ttl: "30d".to_string(),
+        max_entries: 10000,
+        max_response_size: 102400,
+        log_level: "debug".to_string(),
+        match_system_prompt: false,
+        multi_turn_caching: true,
+        auto_cache_control: false,
+    };
+
+    let (event_tx, _rx) = dja::proxy::metrics::event_channel();
+    let state = std::sync::Arc::new(dja::proxy::server::AppState {
+        config,
+        http_client: reqwest::Client::new(),
+        embedding: tokio::sync::Mutex::new(embedding_model),
+        cache,
+        stats: dja::proxy::metrics::SessionStats::new(),
+        event_tx,
+    });
+
+    let app = axum::Router::new()
+        .fallback(dja::proxy::handler::proxy_handler)
+        .with_state(state);
+
+    let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+    let proxy_url = format!("http://127.0.0.1:{}", proxy_addr.port());
+
+    tokio::spawn(async move {
+        axum::serve(proxy_listener, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+
+    let request_body = serde_json::json!({
+        "model": "claude-sonnet-4-20250514",
+        "system": "You are a concise assistant.",
+        "messages": [{"role": "user", "content": "Disabled injection test"}]
+    });
+
+    let resp = client
+        .post(format!("{proxy_url}/v1/messages"))
+        .header("content-type", "application/json")
+        .header("x-api-key", "test-key")
+        .json(&request_body)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let received = mock_state.last_body.lock().await;
+    let received_json = received.as_ref().unwrap();
+
+    // System should remain a string — no injection happened
+    let system = received_json.get("system").unwrap();
+    assert!(
+        system.is_string(),
+        "system should remain a string when auto_cache_control is disabled, got: {:?}", system
     );
 }
