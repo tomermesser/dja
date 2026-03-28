@@ -131,6 +131,7 @@ async fn test_proxy_non_streaming_cache_hit() {
         log_level: "debug".to_string(),
         match_system_prompt: false,
         multi_turn_caching: true,
+        auto_cache_control: true,
     };
 
     // Set up proxy
@@ -237,6 +238,7 @@ async fn test_proxy_streaming_cache_hit() {
         log_level: "debug".to_string(),
         match_system_prompt: false,
         multi_turn_caching: true,
+        auto_cache_control: true,
     };
 
     let (event_tx, _rx) = dja::proxy::metrics::event_channel();

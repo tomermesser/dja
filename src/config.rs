@@ -27,6 +27,9 @@ pub struct Config {
     /// Whether to enable multi-turn caching (cache based on last user message).
     /// Default true.
     pub multi_turn_caching: bool,
+    /// Whether to auto-inject Anthropic cache_control breakpoints on forwarded requests.
+    /// Default true.
+    pub auto_cache_control: bool,
 }
 
 impl Default for Config {
@@ -41,6 +44,7 @@ impl Default for Config {
             log_level: "info".to_string(),
             match_system_prompt: false,
             multi_turn_caching: true,
+            auto_cache_control: true,
         }
     }
 }
@@ -190,5 +194,20 @@ mod tests {
         "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(!config.multi_turn_caching);
+    }
+
+    #[test]
+    fn test_default_auto_cache_control_is_true() {
+        let config = Config::default();
+        assert!(config.auto_cache_control);
+    }
+
+    #[test]
+    fn test_parse_auto_cache_control_false() {
+        let toml_str = r#"
+            auto_cache_control = false
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(!config.auto_cache_control);
     }
 }
