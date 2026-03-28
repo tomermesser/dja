@@ -127,7 +127,9 @@ async fn handle_messages_request(
                 response_size: None,
                 timestamp: metrics::now_timestamp(),
             });
-            let req = Request::from_parts(parts, Body::from(body_bytes));
+            // Injection is safe here: cache key was already extracted in check_eligibility above.
+            let forward_body = maybe_inject_cache_control(&body_bytes, &state.config);
+            let req = Request::from_parts(parts, Body::from(forward_body));
             return forward::forward_request(&state, req).await;
         }
     };
@@ -153,7 +155,9 @@ async fn handle_messages_request(
                 response_size: None,
                 timestamp: metrics::now_timestamp(),
             });
-            let req = Request::from_parts(parts, Body::from(body_bytes));
+            // Injection is safe here: cache key was already extracted in check_eligibility above.
+            let forward_body = maybe_inject_cache_control(&body_bytes, &state.config);
+            let req = Request::from_parts(parts, Body::from(forward_body));
             return forward::forward_request(&state, req).await;
         }
     };

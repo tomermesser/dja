@@ -287,6 +287,32 @@ mod tests {
         assert!(inject_cache_control(&body).is_none());
     }
 
+    // System array already fully marked, tools get the remaining slot
+    #[test]
+    fn test_tools_get_slot_when_system_already_marked() {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "system": [
+                {"type": "text", "text": "system prompt", "cache_control": {"type": "ephemeral"}}
+            ],
+            "tools": [
+                {"name": "tool_a", "description": "tool", "input_schema": {"type": "object"}}
+            ],
+            "messages": [{"role": "user", "content": "Hello"}]
+        })).unwrap();
+
+        let result = inject_cache_control(&body).expect("should inject on tools when system is already marked");
+        let json: serde_json::Value = serde_json::from_slice(&result).unwrap();
+
+        // System already marked — should be unchanged
+        let system = json["system"].as_array().unwrap();
+        assert!(has_cache_control(&system[0]), "system block should retain its existing cache_control");
+
+        // Tools should get the remaining slot
+        let tools = json["tools"].as_array().unwrap();
+        assert!(has_cache_control(&tools[0]), "tool should get the remaining slot");
+    }
+
     #[test]
     fn test_string_system_conversion_preserves_text() {
         let original_text = "You are a pirate. Speak only in pirate English.";
