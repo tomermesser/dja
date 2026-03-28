@@ -4,7 +4,9 @@ use bytes::Bytes;
 ///
 /// Marks the system prompt (priority 1) and the last tool definition
 /// (priority 2) with `"cache_control": {"type": "ephemeral"}`, enabling
-/// Anthropic-side prompt caching. Respects the 4-breakpoint limit: counts
+/// Anthropic-side prompt caching. If the system prompt is a plain string,
+/// it is converted to a single-block array in the forwarded copy (original
+/// bytes are unmodified). Respects the 4-breakpoint limit: counts
 /// existing markers first and only uses remaining slots.
 ///
 /// Returns `Some(modified_bytes)` if any injection happened, `None` if the
@@ -51,6 +53,7 @@ pub fn inject_cache_control(body: &[u8]) -> Option<Bytes> {
                                 serde_json::json!({"type": "ephemeral"}),
                             );
                             injected_tools = true;
+                            remaining -= 1;
                         }
                     }
                 }
@@ -264,7 +267,17 @@ mod tests {
     }
 
     #[test]
-    fn test_returns_none_when_already_fully_marked() {
+    fn test_returns_none_for_empty_tools_no_system() {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "tools": [],
+            "messages": [{"role": "user", "content": "Hello"}]
+        })).unwrap();
+        assert!(inject_cache_control(&body).is_none());
+    }
+
+    #[test]
+    fn test_returns_none_when_targets_already_marked() {
         let body = serde_json::to_vec(&serde_json::json!({
             "model": "claude-sonnet-4-20250514",
             "system": [{"type": "text", "text": "system", "cache_control": {"type": "ephemeral"}}],
