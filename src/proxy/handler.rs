@@ -1,3 +1,5 @@
+use crate::config::Config;
+use crate::proxy::cache_control;
 use crate::proxy::eligibility;
 use crate::proxy::forward;
 use crate::proxy::metrics::{self, RequestEvent};
@@ -8,6 +10,17 @@ use axum::extract::State;
 use axum::http::{Method, Request, Response};
 use std::sync::Arc;
 use std::time::Instant;
+
+/// Gate for cache_control injection. Returns modified bytes if injection is
+/// enabled and applicable, otherwise returns a copy of the original bytes.
+fn maybe_inject_cache_control(body: &[u8], config: &Config) -> bytes::Bytes {
+    if config.auto_cache_control {
+        cache_control::inject_cache_control(body)
+            .unwrap_or_else(|| bytes::Bytes::copy_from_slice(body))
+    } else {
+        bytes::Bytes::copy_from_slice(body)
+    }
+}
 
 /// Catch-all handler that forwards every request to the upstream API,
 /// with semantic caching for eligible POST /v1/messages requests.
@@ -90,8 +103,9 @@ async fn handle_messages_request(
                 response_size: None,
                 timestamp: metrics::now_timestamp(),
             });
-            // Reconstruct the request and forward normally
-            let req = Request::from_parts(parts, Body::from(body_bytes));
+            // Injection is safe here: no cache key was extracted for skipped requests.
+            let forward_body = maybe_inject_cache_control(&body_bytes, &state.config);
+            let req = Request::from_parts(parts, Body::from(forward_body));
             return forward::forward_request(&state, req).await;
         }
     };
@@ -214,11 +228,16 @@ async fn handle_messages_request(
                 timestamp: metrics::now_timestamp(),
             });
 
+            // SAFETY: injection is safe here because the cache key (user_message embedding)
+            // was already extracted above in check_eligibility. Mutating the forwarded bytes
+            // does not affect the semantic cache lookup or storage paths.
+            let forward_body = maybe_inject_cache_control(&body_bytes, &state.config);
+
             if parsed.is_streaming {
                 // Streaming cache miss: tee the stream to client + buffer for cache
-                let req = Request::from_parts(parts, Body::from(body_bytes));
+                let req = Request::from_parts(parts, Body::from(forward_body.clone()));
                 let (upstream_resp, response_builder) =
-                    forward::forward_raw(&state, req, parsed.full_body).await?;
+                    forward::forward_raw(&state, req, forward_body).await?;
 
                 let status = upstream_resp.status();
                 let (body, buffer_rx) = stream::tee_stream(upstream_resp);
@@ -270,9 +289,9 @@ async fn handle_messages_request(
                 Ok(response)
             } else {
                 // Non-streaming cache miss: buffer entire response
-                let req = Request::from_parts(parts, Body::from(body_bytes));
+                let req = Request::from_parts(parts, Body::from(forward_body.clone()));
                 let (response, response_bytes) =
-                    forward::forward_with_body(&state, req, parsed.full_body).await?;
+                    forward::forward_with_body(&state, req, forward_body).await?;
 
                 let status = response.status();
                 let response_size = response_bytes.len();
