@@ -15,6 +15,8 @@ pub struct RequestEvent {
     pub body_size: usize,
     pub response_size: Option<usize>,
     pub timestamp: String,
+    /// Hostname that originally cached this response (only set on cache hits).
+    pub source: Option<String>,
 }
 
 /// Atomic session-level counters for the proxy.

@@ -65,6 +65,7 @@ pub async fn run(file: String) -> Result<()> {
             &entry.model,
             &embedding,
             &response_data,
+            "local",
         )
         .await?;
 

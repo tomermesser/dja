@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS cache (
     response_size INTEGER NOT NULL,
     created_at INTEGER NOT NULL,
     hit_count INTEGER DEFAULT 0,
-    last_hit INTEGER DEFAULT 0
+    last_hit INTEGER DEFAULT 0,
+    source TEXT NOT NULL DEFAULT 'local'
 );
 
 CREATE INDEX IF NOT EXISTS cache_vec_idx ON cache (
@@ -45,6 +46,13 @@ async fn apply_schema(conn: &Connection) -> Result<()> {
                 .with_context(|| format!("Failed to execute schema statement: {statement}"))?;
         }
     }
+    // Migration: add 'source' column to existing databases (ignore error if already present)
+    let _ = conn
+        .execute(
+            "ALTER TABLE cache ADD COLUMN source TEXT NOT NULL DEFAULT 'local'",
+            (),
+        )
+        .await;
     Ok(())
 }
 

@@ -13,6 +13,19 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, Mutex};
 
+fn get_local_hostname() -> String {
+    let mut buf = [0u8; 256];
+    let result = unsafe {
+        libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len())
+    };
+    if result == 0 {
+        let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        String::from_utf8_lossy(&buf[..len]).to_string()
+    } else {
+        "local".to_string()
+    }
+}
+
 /// Shared state available to all handlers.
 pub struct AppState {
     pub config: Config,
@@ -22,6 +35,8 @@ pub struct AppState {
     pub stats: SessionStats,
     pub event_tx: broadcast::Sender<metrics::RequestEvent>,
     pub inflight: InflightMap,
+    /// Hostname of this machine — stored with cache entries as the response source.
+    pub hostname: String,
 }
 
 /// Start the proxy server and run until the shutdown signal fires.
@@ -55,6 +70,7 @@ pub async fn run(config: Config, shutdown: impl Future<Output = ()> + Send + 'st
         stats: SessionStats::new(),
         event_tx,
         inflight: InflightMap::new(),
+        hostname: get_local_hostname(),
     });
 
     let app = Router::new()

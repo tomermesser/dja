@@ -32,7 +32,7 @@ async fn test_store_and_stats() {
     let data = b"response payload";
 
     let id = db
-        .store("test prompt", "sys123", "gpt-4", &emb, data)
+        .store("test prompt", "sys123", "gpt-4", &emb, data, "local")
         .await
         .expect("store failed");
     assert!(id > 0);
@@ -61,7 +61,7 @@ async fn test_store_and_lookup_hit() {
     let emb = make_embedding(1.0);
     let data = b"cached response";
 
-    db.store("hello world", "syshash", "gpt-4", &emb, data)
+    db.store("hello world", "syshash", "gpt-4", &emb, data, "local")
         .await
         .expect("store failed");
 
@@ -84,7 +84,7 @@ async fn test_lookup_wrong_model_no_hit() {
     let db = CacheDb::open_in_memory().await.expect("open failed");
     let emb = make_embedding(1.0);
 
-    db.store("prompt", "syshash", "gpt-4", &emb, b"data")
+    db.store("prompt", "syshash", "gpt-4", &emb, b"data", "local")
         .await
         .unwrap();
 
@@ -101,7 +101,7 @@ async fn test_lookup_wrong_system_hash_no_hit() {
     let db = CacheDb::open_in_memory().await.expect("open failed");
     let emb = make_embedding(1.0);
 
-    db.store("prompt", "hash_a", "gpt-4", &emb, b"data")
+    db.store("prompt", "hash_a", "gpt-4", &emb, b"data", "local")
         .await
         .unwrap();
 
@@ -118,7 +118,7 @@ async fn test_evict_by_ttl() {
     let db = CacheDb::open_in_memory().await.expect("open failed");
     let emb = make_embedding(1.0);
 
-    db.store("old prompt", "sys", "gpt-4", &emb, b"old data")
+    db.store("old prompt", "sys", "gpt-4", &emb, b"old data", "local")
         .await
         .unwrap();
 
@@ -132,7 +132,7 @@ async fn test_evict_by_ttl() {
 
     // Store a fresh entry
     let emb2 = make_embedding(2.0);
-    db.store("new prompt", "sys", "gpt-4", &emb2, b"new data")
+    db.store("new prompt", "sys", "gpt-4", &emb2, b"new data", "local")
         .await
         .unwrap();
 
@@ -156,6 +156,7 @@ async fn test_evict_lru() {
             "gpt-4",
             &emb,
             format!("data {i}").as_bytes(),
+            "local",
         )
         .await
         .unwrap();
@@ -173,7 +174,7 @@ async fn test_evict_lru() {
 async fn test_evict_lru_no_op_when_under_limit() {
     let db = CacheDb::open_in_memory().await.expect("open failed");
     let emb = make_embedding(1.0);
-    db.store("prompt", "sys", "gpt-4", &emb, b"data")
+    db.store("prompt", "sys", "gpt-4", &emb, b"data", "local")
         .await
         .unwrap();
 
@@ -188,7 +189,7 @@ async fn test_clear_all() {
 
     for i in 0..3 {
         let emb = make_embedding(i as f32 * 10.0);
-        db.store("prompt", "sys", "gpt-4", &emb, b"data")
+        db.store("prompt", "sys", "gpt-4", &emb, b"data", "local")
             .await
             .unwrap();
     }
@@ -212,8 +213,8 @@ async fn test_stats_functions() {
     // Add entries
     let emb1 = make_embedding(1.0);
     let emb2 = make_embedding(2.0);
-    db.store("p1", "sys", "gpt-4", &emb1, b"aaaa").await.unwrap();
-    db.store("p2", "sys", "gpt-4", &emb2, b"bbbbbb").await.unwrap();
+    db.store("p1", "sys", "gpt-4", &emb1, b"aaaa", "local").await.unwrap();
+    db.store("p2", "sys", "gpt-4", &emb2, b"bbbbbb", "local").await.unwrap();
 
     assert_eq!(db.entry_count().await.unwrap(), 2);
     assert_eq!(db.total_size().await.unwrap(), 10); // 4 + 6
@@ -229,7 +230,7 @@ async fn test_lookup_ignores_system_hash_when_disabled() {
     let db = CacheDb::open_in_memory().await.expect("open failed");
     let emb = make_embedding(1.0);
 
-    db.store("prompt", "hash_a", "gpt-4", &emb, b"cached data")
+    db.store("prompt", "hash_a", "gpt-4", &emb, b"cached data", "local")
         .await
         .unwrap();
 
@@ -247,7 +248,7 @@ async fn test_lookup_respects_system_hash_when_enabled() {
     let db = CacheDb::open_in_memory().await.expect("open failed");
     let emb = make_embedding(1.0);
 
-    db.store("prompt", "hash_a", "gpt-4", &emb, b"cached data")
+    db.store("prompt", "hash_a", "gpt-4", &emb, b"cached data", "local")
         .await
         .unwrap();
 

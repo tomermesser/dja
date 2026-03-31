@@ -8,6 +8,8 @@ pub struct CacheHit {
     pub prompt_text: String,
     pub response_data: Vec<u8>,
     pub similarity: f32,
+    /// Hostname of the machine that originally cached this entry.
+    pub source: String,
 }
 
 impl CacheDb {
@@ -44,13 +46,15 @@ impl CacheDb {
         // neighbor belongs to a different system/model.
         let query = if match_system_prompt {
             "SELECT c.id, c.prompt_text, c.response_data,
-                    vector_distance_cos(c.embedding, vector32(?1)) AS dist
+                    vector_distance_cos(c.embedding, vector32(?1)) AS dist,
+                    c.source
              FROM vector_top_k('cache_vec_idx', vector32(?1), 10) AS v
              JOIN cache AS c ON c.rowid = v.id
              WHERE c.system_hash = ?2 AND c.model = ?3"
         } else {
             "SELECT c.id, c.prompt_text, c.response_data,
-                    vector_distance_cos(c.embedding, vector32(?1)) AS dist
+                    vector_distance_cos(c.embedding, vector32(?1)) AS dist,
+                    c.source
              FROM vector_top_k('cache_vec_idx', vector32(?1), 10) AS v
              JOIN cache AS c ON c.rowid = v.id
              WHERE c.model = ?3"
@@ -74,6 +78,7 @@ impl CacheDb {
         let response_data = row.get::<libsql::Value>(2)?;
         let distance: f64 = row.get(3)?;
         let similarity = 1.0 - distance as f32;
+        let source: String = row.get(4).unwrap_or_else(|_| "local".to_string());
 
         // Check if similarity meets threshold
         if distance > max_distance as f64 {
@@ -104,6 +109,7 @@ impl CacheDb {
             prompt_text,
             response_data,
             similarity,
+            source,
         }))
     }
 }

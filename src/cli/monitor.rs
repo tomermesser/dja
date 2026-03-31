@@ -53,6 +53,9 @@ struct EventData {
     #[allow(dead_code)]
     response_size: Option<usize>,
     timestamp: String,
+    /// Hostname that originally cached this response (only set on cache hits).
+    #[serde(default)]
+    source: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -456,6 +459,7 @@ fn render_live_feed(f: &mut Frame, area: Rect, state: &MonitorState) {
                 .collect::<String>();
             let snippet_display = format!("\"{snippet}\"");
             let model_str = shorten_model(ev.model.as_deref().unwrap_or(""));
+            let source_str = ev.source.as_deref().unwrap_or("--").to_string();
 
             Row::new(vec![
                 time_str,
@@ -463,6 +467,7 @@ fn render_live_feed(f: &mut Frame, area: Rect, state: &MonitorState) {
                 latency_str,
                 snippet_display,
                 model_str,
+                source_str,
             ])
             .style(Style::default().fg(color))
         })
@@ -474,6 +479,7 @@ fn render_live_feed(f: &mut Frame, area: Rect, state: &MonitorState) {
         Constraint::Length(8),  // latency
         Constraint::Min(20),   // snippet
         Constraint::Length(8),  // model
+        Constraint::Length(16), // source
     ];
 
     let table = Table::new(rows, widths);

@@ -19,6 +19,7 @@ impl CacheDb {
         model: &str,
         embedding: &[f32],
         response_data: &[u8],
+        source: &str,
     ) -> Result<i64> {
         let response_size = response_data.len() as i64;
         let created_at = std::time::SystemTime::now()
@@ -39,8 +40,8 @@ impl CacheDb {
         let conn = self.conn.lock().await;
         let mut rows = conn
             .query(
-                "INSERT INTO cache (prompt_text, system_hash, model, embedding, response_data, response_size, created_at)
-                 VALUES (?1, ?2, ?3, vector32(?4), ?5, ?6, ?7)
+                "INSERT INTO cache (prompt_text, system_hash, model, embedding, response_data, response_size, created_at, source)
+                 VALUES (?1, ?2, ?3, vector32(?4), ?5, ?6, ?7, ?8)
                  RETURNING id",
                 libsql::params![
                     prompt,
@@ -50,6 +51,7 @@ impl CacheDb {
                     response_data.to_vec(),
                     response_size,
                     created_at,
+                    source,
                 ],
             )
             .await

@@ -200,6 +200,7 @@ async fn test_proxy_non_streaming_cache_hit() {
         stats: dja::proxy::metrics::SessionStats::new(),
         event_tx,
         inflight: dja::proxy::inflight::InflightMap::new(),
+        hostname: "test".to_string(),
     });
 
     let app = axum::Router::new()
@@ -308,6 +309,7 @@ async fn test_proxy_streaming_cache_hit() {
         stats: dja::proxy::metrics::SessionStats::new(),
         event_tx,
         inflight: dja::proxy::inflight::InflightMap::new(),
+        hostname: "test".to_string(),
     });
 
     let app = axum::Router::new()
@@ -417,6 +419,7 @@ async fn test_cache_control_injected_on_miss() {
         stats: dja::proxy::metrics::SessionStats::new(),
         event_tx,
         inflight: dja::proxy::inflight::InflightMap::new(),
+        hostname: "test".to_string(),
     });
 
     let app = axum::Router::new()
@@ -520,6 +523,7 @@ async fn test_cache_control_not_injected_when_disabled() {
         stats: dja::proxy::metrics::SessionStats::new(),
         event_tx,
         inflight: dja::proxy::inflight::InflightMap::new(),
+        hostname: "test".to_string(),
     });
 
     let app = axum::Router::new()

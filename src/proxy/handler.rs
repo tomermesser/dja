@@ -103,6 +103,7 @@ async fn handle_messages_request(
                 body_size,
                 response_size: None,
                 timestamp: metrics::now_timestamp(),
+                source: None,
             });
             // Injection is safe here: no cache key was extracted for skipped requests.
             let forward_body = maybe_inject_cache_control(&body_bytes, &state.config);
@@ -127,6 +128,7 @@ async fn handle_messages_request(
                 body_size,
                 response_size: None,
                 timestamp: metrics::now_timestamp(),
+                source: None,
             });
             // Injection is safe here: cache key was already extracted in check_eligibility above.
             let forward_body = maybe_inject_cache_control(&body_bytes, &state.config);
@@ -155,6 +157,7 @@ async fn handle_messages_request(
                 body_size,
                 response_size: None,
                 timestamp: metrics::now_timestamp(),
+                source: None,
             });
             // Injection is safe here: cache key was already extracted in check_eligibility above.
             let forward_body = maybe_inject_cache_control(&body_bytes, &state.config);
@@ -187,6 +190,7 @@ async fn handle_messages_request(
                 body_size,
                 response_size: Some(response_size),
                 timestamp: metrics::now_timestamp(),
+                source: Some(hit.source.clone()),
             });
 
             // Return cached response bytes as-is.
@@ -266,6 +270,7 @@ async fn handle_messages_request(
                                     body_size,
                                     response_size: Some(response_size),
                                     timestamp: metrics::now_timestamp(),
+                                    source: Some(hit.source.clone()),
                                 });
 
                                 let content_type = if parsed.is_streaming {
@@ -311,6 +316,7 @@ async fn handle_messages_request(
                 body_size,
                 response_size: None,
                 timestamp: metrics::now_timestamp(),
+                source: None,
             });
 
             // SAFETY: injection is safe here because the cache key (user_message embedding)
@@ -333,6 +339,7 @@ async fn handle_messages_request(
                 let user_message = parsed.user_message;
                 let system_hash = parsed.system_hash;
                 let model = parsed.model;
+                let hostname = state.hostname.clone();
                 let is_success = status.is_success();
 
                 tokio::spawn(async move {
@@ -350,6 +357,7 @@ async fn handle_messages_request(
                                             &model,
                                             &embedding,
                                             &buffer,
+                                            &hostname,
                                         )
                                         .await
                                     {
@@ -396,6 +404,7 @@ async fn handle_messages_request(
                             &parsed.model,
                             &embedding,
                             &response_bytes,
+                            &state.hostname,
                         )
                         .await
                     {
