@@ -24,6 +24,7 @@ pub struct SessionStats {
     pub misses: AtomicU64,
     pub skips: AtomicU64,
     pub errors: AtomicU64,
+    pub coalesced: AtomicU64,
     pub time_saved_ms: AtomicU64,
     pub upstream_bytes_saved: AtomicU64,
     pub response_bytes_saved: AtomicU64,
@@ -38,6 +39,7 @@ impl SessionStats {
             misses: AtomicU64::new(0),
             skips: AtomicU64::new(0),
             errors: AtomicU64::new(0),
+            coalesced: AtomicU64::new(0),
             time_saved_ms: AtomicU64::new(0),
             upstream_bytes_saved: AtomicU64::new(0),
             response_bytes_saved: AtomicU64::new(0),
@@ -79,6 +81,16 @@ impl SessionStats {
     /// Record an error.
     pub fn record_error(&self) {
         self.errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a coalesced request (served from cache after waiting for in-flight leader).
+    pub fn record_coalesced(&self, body_size: usize, response_size: usize) {
+        self.coalesced.fetch_add(1, Ordering::Relaxed);
+        self.hits.fetch_add(1, Ordering::Relaxed);
+        self.upstream_bytes_saved
+            .fetch_add(body_size as u64, Ordering::Relaxed);
+        self.response_bytes_saved
+            .fetch_add(response_size as u64, Ordering::Relaxed);
     }
 
     /// Seconds since the session started.

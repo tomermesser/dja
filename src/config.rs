@@ -30,6 +30,9 @@ pub struct Config {
     /// Whether to auto-inject Anthropic cache_control breakpoints on forwarded requests.
     /// Default true.
     pub auto_cache_control: bool,
+    /// Whether to coalesce identical in-flight requests (singleflight).
+    /// Default true.
+    pub request_coalescing: bool,
 }
 
 impl Default for Config {
@@ -40,11 +43,12 @@ impl Default for Config {
             threshold: 0.95,
             ttl: "30d".to_string(),
             max_entries: 10000,
-            max_response_size: 102400,
+            max_response_size: 1_048_576,
             log_level: "info".to_string(),
             match_system_prompt: false,
             multi_turn_caching: true,
             auto_cache_control: true,
+            request_coalescing: true,
         }
     }
 }
@@ -127,7 +131,7 @@ mod tests {
         assert!((config.threshold - 0.95).abs() < f64::EPSILON);
         assert_eq!(config.ttl, "30d");
         assert_eq!(config.max_entries, 10000);
-        assert_eq!(config.max_response_size, 102400);
+        assert_eq!(config.max_response_size, 1_048_576);
         assert_eq!(config.log_level, "info");
     }
 

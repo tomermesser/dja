@@ -2,6 +2,7 @@ use crate::cache::CacheDb;
 use crate::config::Config;
 use crate::embedding::EmbeddingModel;
 use crate::proxy::handler;
+use crate::proxy::inflight::InflightMap;
 use crate::proxy::internal;
 use crate::proxy::metrics::{self, SessionStats};
 use anyhow::{Context, Result};
@@ -20,6 +21,7 @@ pub struct AppState {
     pub cache: CacheDb,
     pub stats: SessionStats,
     pub event_tx: broadcast::Sender<metrics::RequestEvent>,
+    pub inflight: InflightMap,
 }
 
 /// Start the proxy server and run until the shutdown signal fires.
@@ -52,6 +54,7 @@ pub async fn run(config: Config, shutdown: impl Future<Output = ()> + Send + 'st
         cache,
         stats: SessionStats::new(),
         event_tx,
+        inflight: InflightMap::new(),
     });
 
     let app = Router::new()

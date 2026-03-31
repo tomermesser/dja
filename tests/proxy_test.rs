@@ -187,6 +187,7 @@ async fn test_proxy_non_streaming_cache_hit() {
         match_system_prompt: false,
         multi_turn_caching: true,
         auto_cache_control: true,
+        request_coalescing: true,
     };
 
     // Set up proxy
@@ -198,6 +199,7 @@ async fn test_proxy_non_streaming_cache_hit() {
         cache,
         stats: dja::proxy::metrics::SessionStats::new(),
         event_tx,
+        inflight: dja::proxy::inflight::InflightMap::new(),
     });
 
     let app = axum::Router::new()
@@ -294,6 +296,7 @@ async fn test_proxy_streaming_cache_hit() {
         match_system_prompt: false,
         multi_turn_caching: true,
         auto_cache_control: true,
+        request_coalescing: true,
     };
 
     let (event_tx, _rx) = dja::proxy::metrics::event_channel();
@@ -304,6 +307,7 @@ async fn test_proxy_streaming_cache_hit() {
         cache,
         stats: dja::proxy::metrics::SessionStats::new(),
         event_tx,
+        inflight: dja::proxy::inflight::InflightMap::new(),
     });
 
     let app = axum::Router::new()
@@ -401,6 +405,7 @@ async fn test_cache_control_injected_on_miss() {
         match_system_prompt: false,
         multi_turn_caching: true,
         auto_cache_control: true,
+        request_coalescing: true,
     };
 
     let (event_tx, _rx) = dja::proxy::metrics::event_channel();
@@ -411,6 +416,7 @@ async fn test_cache_control_injected_on_miss() {
         cache,
         stats: dja::proxy::metrics::SessionStats::new(),
         event_tx,
+        inflight: dja::proxy::inflight::InflightMap::new(),
     });
 
     let app = axum::Router::new()
@@ -502,6 +508,7 @@ async fn test_cache_control_not_injected_when_disabled() {
         match_system_prompt: false,
         multi_turn_caching: true,
         auto_cache_control: false,
+        request_coalescing: true,
     };
 
     let (event_tx, _rx) = dja::proxy::metrics::event_channel();
@@ -512,6 +519,7 @@ async fn test_cache_control_not_injected_when_disabled() {
         cache,
         stats: dja::proxy::metrics::SessionStats::new(),
         event_tx,
+        inflight: dja::proxy::inflight::InflightMap::new(),
     });
 
     let app = axum::Router::new()

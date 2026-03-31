@@ -18,6 +18,7 @@ pub async fn stats_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
         "misses": stats.misses.load(Ordering::Relaxed),
         "skips": stats.skips.load(Ordering::Relaxed),
         "errors": stats.errors.load(Ordering::Relaxed),
+        "coalesced": stats.coalesced.load(Ordering::Relaxed),
         "time_saved_ms": stats.time_saved_ms.load(Ordering::Relaxed),
         "estimated_tokens_saved": stats.estimated_tokens_saved(),
         "estimated_cost_saved_usd": stats.estimated_cost_saved_usd(),

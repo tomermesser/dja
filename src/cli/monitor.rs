@@ -29,6 +29,8 @@ struct StatsData {
     misses: u64,
     skips: u64,
     errors: u64,
+    #[serde(default)]
+    coalesced: u64,
     time_saved_ms: u64,
     estimated_tokens_saved: u64,
     estimated_cost_saved_usd: f64,

@@ -2,6 +2,7 @@ pub mod cache_control;
 pub mod eligibility;
 pub mod forward;
 pub mod handler;
+pub mod inflight;
 pub mod internal;
 pub mod metrics;
 pub mod server;

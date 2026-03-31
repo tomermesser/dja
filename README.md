@@ -30,11 +30,15 @@ Or use `dja init --global` to add this to your shell profile automatically.
 ## How It Works
 
 1. **Intercept** -- dja proxies all requests to the Anthropic API on `127.0.0.1:9842`.
-2. **Embed** -- For eligible requests (single-turn, no tool use), dja generates a 384-dimensional embedding of the user message using a local ONNX model (all-MiniLM-L6-v2).
+2. **Embed** -- For eligible requests, dja generates a 384-dimensional embedding of the last user message using a local ONNX model (all-MiniLM-L6-v2). Both single-turn and multi-turn conversations are supported (multi-turn is enabled by default).
 3. **Lookup** -- The embedding is compared against cached entries using cosine similarity via libSQL's vector index. If a match is found above the similarity threshold (default 0.95), the cached response is returned.
 4. **Store** -- On cache miss, the request is forwarded to the upstream API. The response is streamed back to the client and simultaneously buffered for caching.
 
 Cached responses are marked with `[cached]` at the start of the response text so you can see when a cache hit occurs.
+
+**Request coalescing**: When identical requests arrive concurrently (e.g., from retries or parallel agents), only one is forwarded upstream. Other waiters are served from cache once the first completes.
+
+**Prompt cache optimization**: dja automatically injects Anthropic `cache_control` breakpoints on the system prompt and tool definitions, enabling server-side prompt caching for additional cost savings.
 
 ## Configuration
 
@@ -46,8 +50,12 @@ upstream = "https://api.anthropic.com"   # Upstream API
 threshold = 0.95                         # Cosine similarity threshold
 ttl = "30d"                              # Cache entry TTL
 max_entries = 10000                      # Maximum cache entries
-max_response_size = 102400               # Max response size to cache (bytes)
+max_response_size = 1048576              # Max response size to cache (bytes, default 1MB)
 log_level = "info"                       # Log level
+match_system_prompt = false              # Require system prompt match (false for Claude Code)
+multi_turn_caching = true                # Cache multi-turn conversations
+auto_cache_control = true                # Auto-inject Anthropic prompt caching breakpoints
+request_coalescing = true                # Deduplicate identical in-flight requests
 ```
 
 ## CLI Reference
@@ -66,3 +74,4 @@ log_level = "info"                       # Log level
 | `dja import <file>` | Import cache from JSON file |
 | `dja log` | Show recent log output |
 | `dja verify` | Verify installation health |
+| `dja monitor` | Open live TUI dashboard |

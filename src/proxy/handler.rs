@@ -2,6 +2,7 @@ use crate::config::Config;
 use crate::proxy::cache_control;
 use crate::proxy::eligibility;
 use crate::proxy::forward;
+use crate::proxy::inflight::{InflightMap, InflightStatus};
 use crate::proxy::metrics::{self, RequestEvent};
 use crate::proxy::server::AppState;
 use crate::proxy::stream;
@@ -9,7 +10,7 @@ use axum::body::Body;
 use axum::extract::State;
 use axum::http::{Method, Request, Response};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Gate for cache_control injection. Returns modified bytes if injection is
 /// enabled and applicable, otherwise returns a copy of the original bytes.
@@ -216,9 +217,89 @@ async fn handle_messages_request(
             let latency_ms = start.elapsed().as_millis() as u64;
             tracing::info!(prompt_snippet = %snippet, "cache MISS");
 
-            // Note: we record miss latency after the full upstream round-trip,
-            // but we send the event now with the current latency. The actual
-            // upstream latency will be captured in the proxied request log.
+            // Request coalescing: if an identical request is already in-flight,
+            // wait for it to complete and retry cache lookup instead of sending
+            // a duplicate upstream request.
+            let coalesce_key = if state.config.request_coalescing {
+                let key = InflightMap::coalesce_key(&parsed.model, &parsed.user_message);
+                match state.inflight.try_register(&key).await {
+                    InflightStatus::Waiter(notify) => {
+                        tracing::debug!(prompt_snippet = %snippet, "coalescing: waiting for in-flight request");
+                        let wait_start = Instant::now();
+
+                        let timed_out = tokio::time::timeout(
+                            Duration::from_secs(60),
+                            notify.notified(),
+                        )
+                        .await
+                        .is_err();
+
+                        if !timed_out {
+                            // Leader completed — retry cache lookup
+                            if let Ok(Some(hit)) = state
+                                .cache
+                                .lookup(
+                                    &embedding,
+                                    &parsed.system_hash,
+                                    &parsed.model,
+                                    state.config.threshold as f32,
+                                    state.config.match_system_prompt,
+                                )
+                                .await
+                            {
+                                let waited_ms = wait_start.elapsed().as_millis() as u64;
+                                let response_size = hit.response_data.len();
+                                tracing::info!(
+                                    similarity = hit.similarity,
+                                    waited_ms,
+                                    prompt_snippet = %snippet,
+                                    "cache COALESCED"
+                                );
+                                state.stats.record_coalesced(body_size, response_size);
+                                let _ = state.event_tx.send(RequestEvent {
+                                    event_type: "coalesced".to_string(),
+                                    latency_ms: Some(waited_ms),
+                                    prompt_snippet: Some(snippet),
+                                    model: Some(parsed.model.clone()),
+                                    similarity: Some(hit.similarity),
+                                    cache_id: Some(hit.id),
+                                    body_size,
+                                    response_size: Some(response_size),
+                                    timestamp: metrics::now_timestamp(),
+                                });
+
+                                let content_type = if parsed.is_streaming {
+                                    "text/event-stream"
+                                } else {
+                                    "application/json"
+                                };
+                                let mut builder = Response::builder()
+                                    .status(200)
+                                    .header("content-type", content_type);
+                                if hit.response_data.len() >= 2
+                                    && hit.response_data[0] == 0x1f
+                                    && hit.response_data[1] == 0x8b
+                                {
+                                    builder = builder.header("content-encoding", "gzip");
+                                }
+                                return Ok(builder
+                                    .body(Body::from(hit.response_data))
+                                    .expect("building coalesced response"));
+                            }
+                            tracing::debug!("coalescing: cache still miss after wait, proceeding to upstream");
+                        } else {
+                            tracing::debug!("coalescing: timed out waiting, proceeding to upstream");
+                        }
+                        // Fall through to upstream — register as new leader
+                        let _ = state.inflight.try_register(&key).await;
+                        Some(key)
+                    }
+                    InflightStatus::Leader => Some(key),
+                }
+            } else {
+                None
+            };
+
             state.stats.record_miss(latency_ms);
             let _ = state.event_tx.send(RequestEvent {
                 event_type: "miss".to_string(),
@@ -248,19 +329,20 @@ async fn handle_messages_request(
                 let response = response_builder.body(body)?;
 
                 // Spawn background task to cache the response once streaming completes
-                if status.is_success() {
-                    let state = Arc::clone(&state);
-                    let user_message = parsed.user_message;
-                    let system_hash = parsed.system_hash;
-                    let model = parsed.model;
+                let state_bg = Arc::clone(&state);
+                let user_message = parsed.user_message;
+                let system_hash = parsed.system_hash;
+                let model = parsed.model;
+                let is_success = status.is_success();
 
-                    tokio::spawn(async move {
-                        let max_response_size = state.config.max_response_size;
+                tokio::spawn(async move {
+                    if is_success {
+                        let max_response_size = state_bg.config.max_response_size;
                         match buffer_rx.await {
                             Ok(buffer) => {
                                 let response_size = buffer.len();
                                 if response_size <= max_response_size {
-                                    if let Err(e) = state
+                                    if let Err(e) = state_bg
                                         .cache
                                         .store(
                                             &user_message,
@@ -287,8 +369,12 @@ async fn handle_messages_request(
                                 tracing::warn!("cache ERROR: stream buffer channel closed before completion");
                             }
                         }
-                    });
-                }
+                    }
+                    // Always complete the in-flight entry to unblock waiters
+                    if let Some(key) = coalesce_key {
+                        state_bg.inflight.complete(&key).await;
+                    }
+                });
 
                 Ok(response)
             } else {
@@ -325,6 +411,11 @@ async fn handle_messages_request(
                         max = state.config.max_response_size,
                         "not caching oversized response"
                     );
+                }
+
+                // Complete the in-flight entry to unblock waiters
+                if let Some(key) = coalesce_key {
+                    state.inflight.complete(&key).await;
                 }
 
                 Ok(response)
