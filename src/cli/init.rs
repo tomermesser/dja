@@ -6,40 +6,65 @@ use uuid::Uuid;
 
 /// Run the `dja init` command.
 pub async fn run(global: bool) -> Result<()> {
+    use std::io::{self, Write};
+
     // 1. Create config dir and write default config if missing
     Config::ensure_config_dir()?;
     let config_path = Config::config_path();
+
     if !config_path.exists() {
-        let mut default_config = Config::default();
+        let mut config = Config::default();
 
         // Auto-generate a unique peer_id for this machine
-        default_config.p2p.peer_id = format!("dja_{}", &Uuid::new_v4().to_string()[..8]);
+        config.p2p.peer_id = format!("dja_{}", &Uuid::new_v4().to_string()[..8]);
 
         // Prompt for a display name
         print!("Enter a display name for this peer (e.g. \"MacBook Pro\"): ");
-        use std::io::{self, Write};
         io::stdout().flush()?;
         let mut name = String::new();
         io::stdin().read_line(&mut name)?;
         let name = name.trim().to_string();
-        if !name.is_empty() {
-            default_config.p2p.display_name = name;
+        config.p2p.display_name = if !name.is_empty() {
+            name
         } else {
-            default_config.p2p.display_name = default_config.p2p.peer_id.clone();
+            config.p2p.peer_id.clone()
+        };
+
+        // Auto-detect local IP for public_addr
+        if let Some(ip) = detect_local_ip() {
+            config.p2p.public_addr = format!("{}:{}", ip, config.p2p.listen_port);
+            println!("Detected local IP: {} (update public_addr in config if using Tailscale)", ip);
         }
 
-        let toml_str = toml::to_string_pretty(&default_config)?;
+        // Enable P2P by default
+        config.p2p.enabled = true;
+
+        let toml_str = toml::to_string_pretty(&config)?;
         std::fs::write(&config_path, &toml_str)?;
         println!("Created config at {}", config_path.display());
-        println!("P2P peer ID: {}", default_config.p2p.peer_id);
-        println!("Shared index: {}", default_config.p2p.index_url);
+        println!("Peer ID:      {}", config.p2p.peer_id);
+        println!("Display name: {}", config.p2p.display_name);
+        println!("Public addr:  {}", config.p2p.public_addr);
+        println!("Index:        {}", config.p2p.index_url);
     } else {
-        // Backfill peer_id if missing (existing installs upgrading to P2P)
+        // Backfill any missing P2P fields (existing installs upgrading to P2P)
         let mut config = Config::load()?;
         let mut changed = false;
+
         if config.p2p.peer_id.is_empty() {
             config.p2p.peer_id = format!("dja_{}", &Uuid::new_v4().to_string()[..8]);
             changed = true;
+        }
+        if config.p2p.display_name.is_empty() {
+            config.p2p.display_name = config.p2p.peer_id.clone();
+            changed = true;
+        }
+        if config.p2p.public_addr.is_empty() {
+            if let Some(ip) = detect_local_ip() {
+                config.p2p.public_addr = format!("{}:{}", ip, config.p2p.listen_port);
+                println!("Detected local IP: {}", ip);
+                changed = true;
+            }
         }
         if config.p2p.index_url.is_empty() {
             config.p2p.index_url = env!("DJA_TURSO_URL").to_string();
@@ -49,13 +74,18 @@ pub async fn run(global: bool) -> Result<()> {
             config.p2p.index_token = env!("DJA_TURSO_TOKEN").to_string();
             changed = true;
         }
+
         if changed {
             let toml_str = toml::to_string_pretty(&config)?;
             std::fs::write(&config_path, &toml_str)?;
-            println!("Updated config with P2P defaults at {}", config_path.display());
+            println!("Updated config at {}", config_path.display());
         } else {
             println!("Config already exists at {}", config_path.display());
         }
+
+        println!("Peer ID:      {}", config.p2p.peer_id);
+        println!("Display name: {}", config.p2p.display_name);
+        println!("Public addr:  {}", config.p2p.public_addr);
     }
 
     // 2. Create data dir
@@ -72,20 +102,22 @@ pub async fn run(global: bool) -> Result<()> {
     let _db = CacheDb::open(&db_path).await?;
     println!("Database initialized at {}", db_path.display());
 
-    // 5. Install shell integration
+    // 5. Install shell integration (always, unless already present)
     let config = Config::load()?;
     println!();
-    if global {
-        install_shell_integration(config.port)?;
-    } else {
-        println!("Setup complete!");
-        println!();
-        println!("Run `dja init --global` to install shell integration (recommended).");
-        println!("This makes ANTHROPIC_BASE_URL auto-set when you run `dja start`");
-        println!("and auto-unset when you run `dja stop`.");
-    }
+    install_shell_integration(config.port, global)?;
 
     Ok(())
+}
+
+/// Detect the machine's primary outbound local IP using a UDP socket trick.
+/// No data is actually sent — the OS just determines which interface would be used.
+fn detect_local_ip() -> Option<String> {
+    use std::net::UdpSocket;
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    let addr = socket.local_addr().ok()?;
+    Some(addr.ip().to_string())
 }
 
 /// Installs a shell function wrapper into the user's shell profile.
@@ -93,7 +125,7 @@ pub async fn run(global: bool) -> Result<()> {
 /// The wrapper intercepts `dja start` and `dja stop` to automatically
 /// set/unset ANTHROPIC_BASE_URL in the current shell — something a
 /// background daemon process cannot do on its own.
-fn install_shell_integration(port: u16) -> Result<()> {
+fn install_shell_integration(port: u16, explicit: bool) -> Result<()> {
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
 
     let shell = std::env::var("SHELL").unwrap_or_default();
@@ -103,13 +135,26 @@ fn install_shell_integration(port: u16) -> Result<()> {
         home.join(".bashrc")
     };
 
-    // Marker so we can detect existing installation and avoid duplicates
     let marker = "# dja shell integration";
 
     if let Ok(contents) = std::fs::read_to_string(&profile_path) {
         if contents.contains(marker) {
             println!("Shell integration already installed in {}.", profile_path.display());
-            println!("Restart your shell or run: source {}", profile_path.display());
+            println!("Run `source {}` if you haven't reloaded your shell yet.", profile_path.display());
+            return Ok(());
+        }
+    }
+
+    // If not explicitly requested with --global, prompt the user
+    if !explicit {
+        print!("Install shell integration? (auto-sets ANTHROPIC_BASE_URL on `dja start`) [Y/n]: ");
+        use std::io::{self, Write};
+        io::stdout().flush()?;
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer)?;
+        if answer.trim().to_lowercase() == "n" {
+            println!("Skipped. Run `dja init --global` later to install.");
+            println!("Setup complete!");
             return Ok(());
         }
     }
@@ -124,7 +169,7 @@ dja() {{
     start)
       if [ $_exit -eq 0 ]; then
         export ANTHROPIC_BASE_URL=http://127.0.0.1:{port}
-        echo "dja: ANTHROPIC_BASE_URL set to http://127.0.0.1:{port}"
+        echo "dja: ANTHROPIC_BASE_URL=http://127.0.0.1:{port}"
       fi
       ;;
     stop)
@@ -146,11 +191,10 @@ dja() {{
 
     println!("Shell integration installed in {}.", profile_path.display());
     println!();
-    println!("Reload your shell to activate:");
+    println!("Activate now with:");
     println!("  source {}", profile_path.display());
     println!();
-    println!("After that, `dja start` will automatically set ANTHROPIC_BASE_URL");
-    println!("and `dja stop` will automatically unset it.");
+    println!("After that, `dja start` sets ANTHROPIC_BASE_URL automatically.");
 
     Ok(())
 }
