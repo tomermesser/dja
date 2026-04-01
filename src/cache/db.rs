@@ -137,4 +137,23 @@ impl CacheDb {
         let hits: i64 = row.get(0)?;
         Ok(hits as u64)
     }
+
+    /// Look up a cache entry by its content hash.
+    /// Returns the raw response_data bytes if found.
+    pub async fn lookup_by_content_hash(&self, hash: &str) -> Result<Option<Vec<u8>>> {
+        let conn = self.conn.lock().await;
+        let mut rows = conn
+            .query(
+                "SELECT response_data FROM cache WHERE content_hash = ?1 LIMIT 1",
+                libsql::params![hash],
+            )
+            .await
+            .context("Failed to query by content_hash")?;
+        if let Some(row) = rows.next().await? {
+            let data: Vec<u8> = row.get(0)?;
+            Ok(Some(data))
+        } else {
+            Ok(None)
+        }
+    }
 }

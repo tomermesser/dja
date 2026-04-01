@@ -61,6 +61,34 @@ enum Commands {
     },
     /// Open live TUI dashboard
     Monitor,
+    /// P2P cache-sharing: manage friends and invite codes
+    P2p {
+        #[command(subcommand)]
+        sub: P2pCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum P2pCommands {
+    /// Generate and print an invite code for this node
+    Invite,
+    /// Add a friend by invite code or raw peer_id
+    Add {
+        /// Invite code (base64) or raw peer_id
+        code_or_peer_id: String,
+        /// Public address of the peer (required when adding by raw peer_id)
+        #[arg(long)]
+        addr: Option<String>,
+    },
+    /// Remove a friend by peer_id
+    Remove {
+        /// Peer ID to remove
+        peer_id: String,
+    },
+    /// List all friends
+    Friends,
+    /// Show P2P status
+    Status,
 }
 
 #[tokio::main]
@@ -81,6 +109,15 @@ async fn main() -> anyhow::Result<()> {
         Commands::Export => dja::cli::export::run().await?,
         Commands::Import { file } => dja::cli::import::run(file).await?,
         Commands::Monitor => dja::cli::monitor::run().await?,
+        Commands::P2p { sub } => match sub {
+            P2pCommands::Invite => dja::cli::p2p::run_invite().await?,
+            P2pCommands::Add { code_or_peer_id, addr } => {
+                dja::cli::p2p::run_add(&code_or_peer_id, addr.as_deref()).await?
+            }
+            P2pCommands::Remove { peer_id } => dja::cli::p2p::run_remove(&peer_id).await?,
+            P2pCommands::Friends => dja::cli::p2p::run_friends().await?,
+            P2pCommands::Status => dja::cli::p2p::run_status().await?,
+        },
     }
 
     Ok(())

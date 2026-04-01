@@ -1,6 +1,9 @@
 use crate::cache::CacheDb;
 use crate::config::Config;
 use crate::embedding::EmbeddingModel;
+use crate::p2p::client::PeerClient;
+use crate::p2p::server::{start_peer_server, PeerServerState};
+use crate::config::P2pConfig;
 use crate::proxy::handler;
 use crate::proxy::inflight::InflightMap;
 use crate::proxy::internal;
@@ -37,6 +40,10 @@ pub struct AppState {
     pub inflight: InflightMap,
     /// Hostname of this machine — stored with cache entries as the response source.
     pub hostname: String,
+    /// P2P peer client, present when P2P is enabled.
+    pub p2p_client: Option<Arc<PeerClient>>,
+    /// P2P configuration, present when P2P is enabled.
+    pub p2p_config: Option<Arc<P2pConfig>>,
 }
 
 /// Start the proxy server and run until the shutdown signal fires.
@@ -62,6 +69,14 @@ pub async fn run(config: Config, shutdown: impl Future<Output = ()> + Send + 'st
 
     let (event_tx, _rx) = metrics::event_channel();
 
+    // Build optional P2P state
+    let (p2p_client, p2p_config) = if config.p2p.enabled {
+        let p2p_cfg = Arc::new(config.p2p.clone());
+        (Some(Arc::new(PeerClient::new())), Some(p2p_cfg))
+    } else {
+        (None, None)
+    };
+
     let state = Arc::new(AppState {
         config,
         http_client,
@@ -71,7 +86,29 @@ pub async fn run(config: Config, shutdown: impl Future<Output = ()> + Send + 'st
         event_tx,
         inflight: InflightMap::new(),
         hostname: get_local_hostname(),
+        p2p_client,
+        p2p_config: p2p_config.clone(),
     });
+
+    // Spawn peer server as a background task when P2P is enabled
+    if let Some(cfg) = p2p_config {
+        let peer_state = PeerServerState {
+            db: Arc::new(
+                // We need to open a second handle to the DB for the peer server.
+                // For now, share an in-memory-compatible approach: open a new
+                // connection to the same on-disk path.
+                CacheDb::open(&Config::data_dir().join("cache.db"))
+                    .await
+                    .context("Failed to open cache database for peer server")?,
+            ),
+            config: cfg,
+        };
+        tokio::spawn(async move {
+            if let Err(e) = start_peer_server(peer_state).await {
+                tracing::error!("Peer server exited with error: {e}");
+            }
+        });
+    }
 
     let app = Router::new()
         .route("/internal/stats", get(internal::stats_handler))
