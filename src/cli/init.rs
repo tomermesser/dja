@@ -162,23 +162,30 @@ fn install_shell_integration(port: u16, explicit: bool) -> Result<()> {
     let snippet = format!(
         r#"
 {marker}
+# Checks the dja PID file and sets/unsets ANTHROPIC_BASE_URL accordingly.
+# Runs on every new shell so any terminal auto-picks up a running dja instance.
+_dja_sync_env() {{
+  local pid_file
+  case "$(uname)" in
+    Darwin) pid_file="$HOME/Library/Application Support/dja/dja.pid" ;;
+    *)      pid_file="${{XDG_DATA_HOME:-$HOME/.local/share}}/dja/dja.pid" ;;
+  esac
+  if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
+    export ANTHROPIC_BASE_URL=http://127.0.0.1:{port}
+  else
+    unset ANTHROPIC_BASE_URL
+  fi
+}}
 dja() {{
   command dja "$@"
   local _exit=$?
   case "$1" in
-    start)
-      if [ $_exit -eq 0 ]; then
-        export ANTHROPIC_BASE_URL=http://127.0.0.1:{port}
-        echo "dja: ANTHROPIC_BASE_URL=http://127.0.0.1:{port}"
-      fi
-      ;;
-    stop)
-      unset ANTHROPIC_BASE_URL
-      echo "dja: ANTHROPIC_BASE_URL unset"
-      ;;
+    start|stop) _dja_sync_env ;;
   esac
   return $_exit
 }}
+# Auto-sync on every new shell (picks up dja if already running)
+_dja_sync_env
 "#
     );
 
