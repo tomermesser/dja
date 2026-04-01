@@ -194,33 +194,44 @@ async fn handle_messages_request(
                 source: Some(hit.source.clone()),
             });
 
-            // Return cached response bytes as-is.
-            let content_type = if parsed.is_streaming {
-                "text/event-stream"
-            } else {
-                "application/json"
-            };
-            let mut builder = Response::builder()
-                .status(200)
-                .header("content-type", content_type);
-
-            // Check if stored data looks gzip-compressed (magic bytes 1f 8b)
-            if hit.response_data.len() >= 2
+            // [cached] marker is NOT stored in the DB bytes — inject at serve time.
+            // For gzip-compressed data, skip injection (can't modify compressed bytes).
+            let is_gzip = hit.response_data.len() >= 2
                 && hit.response_data[0] == 0x1f
-                && hit.response_data[1] == 0x8b
-            {
-                builder = builder.header("content-encoding", "gzip");
-            }
+                && hit.response_data[1] == 0x8b;
 
-            Ok(builder
-                .body(Body::from(hit.response_data))
-                .expect("building cached response"))
+            if parsed.is_streaming {
+                // Streaming: replay SSE events with [cached] marker injected.
+                let body = stream::replay_cached_response(hit.response_data, !is_gzip);
+                Ok(Response::builder()
+                    .status(200)
+                    .header("content-type", "text/event-stream")
+                    .body(body)
+                    .expect("building cached streaming response"))
+            } else {
+                // Non-streaming: inject [cached] marker into JSON response.
+                let response_bytes = if is_gzip {
+                    hit.response_data
+                } else {
+                    stream::inject_cached_marker_json(&hit.response_data)
+                };
+                let mut builder = Response::builder()
+                    .status(200)
+                    .header("content-type", "application/json");
+                if is_gzip {
+                    builder = builder.header("content-encoding", "gzip");
+                }
+                Ok(builder
+                    .body(Body::from(response_bytes))
+                    .expect("building cached response"))
+            }
         }
         None => {
-            // Cache MISS — try P2P before request coalescing / upstream.
+            // Local cache MISS — try P2P before request coalescing / upstream.
             let snippet: String = parsed.user_message.chars().take(80).collect();
             let latency_ms = start.elapsed().as_millis() as u64;
-            tracing::info!(prompt_snippet = %snippet, "cache MISS");
+            // NOTE: "cache MISS" log is emitted AFTER P2P check below, so it only
+            // fires when the request truly goes to upstream.
 
             // --- P2P lookup ---
             if let (Some(p2p_index), Some(p2p_client), Some(p2p_config)) = (
@@ -228,7 +239,7 @@ async fn handle_messages_request(
                 state.p2p_client.as_ref(),
                 state.p2p_config.as_ref(),
             ) {
-                if let Some(p2p_hit) = p2p_lookup(
+                match p2p_lookup(
                     p2p_index,
                     p2p_client,
                     &state.cache,
@@ -241,69 +252,95 @@ async fn handle_messages_request(
                 )
                 .await
                 {
-                    let p2p_latency_ms = start.elapsed().as_millis() as u64;
-                    let response_size = p2p_hit.data.len();
-                    let source = format!("p2p:{}", p2p_hit.peer_id);
+                    Ok(Some(p2p_hit)) => {
+                        let p2p_latency_ms = start.elapsed().as_millis() as u64;
+                        let response_size = p2p_hit.data.len();
+                        let source = format!("p2p:{}", p2p_hit.peer_id);
 
-                    tracing::info!(
-                        peer_id = %p2p_hit.peer_id,
-                        content_hash = %p2p_hit.content_hash,
-                        response_size,
-                        "P2P HIT: serving response from peer"
-                    );
+                        tracing::info!(
+                            peer_id = %p2p_hit.peer_id,
+                            content_hash = %p2p_hit.content_hash,
+                            response_size,
+                            "P2P HIT: serving response from peer"
+                        );
 
-                    state.stats.record_p2p_hit(response_size);
-                    let _ = state.event_tx.send(RequestEvent {
-                        event_type: "p2p_hit".to_string(),
-                        latency_ms: Some(p2p_latency_ms),
-                        prompt_snippet: Some(snippet),
-                        model: Some(parsed.model.clone()),
-                        similarity: None,
-                        cache_id: None,
-                        body_size,
-                        response_size: Some(response_size),
-                        timestamp: metrics::now_timestamp(),
-                        source: Some(source.clone()),
-                    });
+                        state.stats.record_p2p_hit(body_size, response_size);
+                        let _ = state.event_tx.send(RequestEvent {
+                            event_type: "p2p_hit".to_string(),
+                            latency_ms: Some(p2p_latency_ms),
+                            prompt_snippet: Some(snippet),
+                            model: Some(parsed.model.clone()),
+                            similarity: None,
+                            cache_id: None,
+                            body_size,
+                            response_size: Some(response_size),
+                            timestamp: metrics::now_timestamp(),
+                            source: Some(source.clone()),
+                        });
 
-                    // Store in local cache so future lookups hit locally.
-                    let store_result = state
-                        .cache
-                        .store(
-                            &parsed.user_message,
-                            &parsed.system_hash,
-                            &parsed.model,
-                            &embedding,
-                            &p2p_hit.data,
-                            &source,
-                        )
-                        .await;
-                    if let Err(e) = store_result {
-                        tracing::warn!(error = %e, "P2P: failed to store fetched response locally");
+                        // Store in local cache so future lookups hit locally.
+                        let store_result = state
+                            .cache
+                            .store(
+                                &parsed.user_message,
+                                &parsed.system_hash,
+                                &parsed.model,
+                                &embedding,
+                                &p2p_hit.data,
+                                &source,
+                            )
+                            .await;
+                        if let Err(e) = store_result {
+                            tracing::warn!(error = %e, "P2P: failed to store fetched response locally");
+                        }
+
+                        // [cached] marker is NOT stored in the fetched bytes — inject at serve time.
+                        // For gzip-compressed data, skip injection (can't modify compressed bytes).
+                        let is_gzip = p2p_hit.data.len() >= 2
+                            && p2p_hit.data[0] == 0x1f
+                            && p2p_hit.data[1] == 0x8b;
+
+                        if parsed.is_streaming {
+                            // Streaming: replay SSE events with [cached] marker injected.
+                            let body =
+                                stream::replay_cached_response(p2p_hit.data, !is_gzip);
+                            return Ok(Response::builder()
+                                .status(200)
+                                .header("content-type", "text/event-stream")
+                                .body(body)
+                                .expect("building p2p streaming response"));
+                        } else {
+                            // Non-streaming: inject [cached] marker into JSON response.
+                            let response_bytes = if is_gzip {
+                                p2p_hit.data
+                            } else {
+                                stream::inject_cached_marker_json(&p2p_hit.data)
+                            };
+                            let mut builder = Response::builder()
+                                .status(200)
+                                .header("content-type", "application/json");
+                            if is_gzip {
+                                builder = builder.header("content-encoding", "gzip");
+                            }
+                            return Ok(builder
+                                .body(Body::from(response_bytes))
+                                .expect("building p2p response"));
+                        }
                     }
-
-                    let content_type = if parsed.is_streaming {
-                        "text/event-stream"
-                    } else {
-                        "application/json"
-                    };
-                    let mut builder = Response::builder()
-                        .status(200)
-                        .header("content-type", content_type);
-
-                    if p2p_hit.data.len() >= 2
-                        && p2p_hit.data[0] == 0x1f
-                        && p2p_hit.data[1] == 0x8b
-                    {
-                        builder = builder.header("content-encoding", "gzip");
+                    Ok(None) => {
+                        // No P2P match found — fall through to upstream.
                     }
-
-                    return Ok(builder
-                        .body(Body::from(p2p_hit.data))
-                        .expect("building p2p response"));
+                    Err(e) => {
+                        // A real P2P error (network failure, timeout, etc.) — record it.
+                        tracing::warn!(error = %e, "P2P: lookup error");
+                        state.stats.record_p2p_error();
+                    }
                 }
             }
             // --- end P2P lookup ---
+
+            // Only log "cache MISS" now that we've confirmed P2P also has no match.
+            tracing::info!(prompt_snippet = %snippet, "cache MISS");
 
             // Request coalescing: if an identical request is already in-flight,
             // wait for it to complete and retry cache lookup instead of sending
@@ -451,6 +488,12 @@ async fn handle_messages_request(
                                         Ok(_) => {
                                             tracing::debug!(response_size, "cached streamed response stored");
                                             // Fire-and-forget: publish to central index.
+                                            // SHA-256 CONSISTENCY NOTE: both streaming and
+                                            // non-streaming paths hash the raw upstream bytes
+                                            // (before any [cached] marker injection — injection
+                                            // happens only at serve time on cache hits). So
+                                            // content_hash is identical for the same logical
+                                            // response regardless of whether it was streamed.
                                             if let (Some(index), Some(p2p_cfg)) = (
                                                 state_bg.p2p_index.as_ref(),
                                                 state_bg.p2p_config.as_ref(),
@@ -519,6 +562,9 @@ async fn handle_messages_request(
                         Ok(_) => {
                             tracing::debug!(response_size, "cached response stored");
                             // Fire-and-forget: publish to central index.
+                            // SHA-256 CONSISTENCY: hashed over raw upstream bytes (no
+                            // [cached] marker — that's injected at serve time only).
+                            // Matches the streaming path's hashing strategy exactly.
                             if let (Some(index), Some(p2p_cfg)) = (
                                 state.p2p_index.as_ref(),
                                 state.p2p_config.as_ref(),

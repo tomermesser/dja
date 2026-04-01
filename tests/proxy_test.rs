@@ -261,8 +261,8 @@ async fn test_proxy_non_streaming_cache_hit() {
     let body2: serde_json::Value = resp2.json().await.unwrap();
     let text2 = body2["content"][0]["text"].as_str().unwrap();
 
-    // Cached response should have the same text (marker injection disabled to avoid parsing issues)
-    assert_eq!(text2, "Hello from mock!", "Cached response text should match original");
+    // Cached response should have the [cached] marker prepended to the first text block.
+    assert_eq!(text2, "[cached] Hello from mock!", "Cached response should have [cached] marker");
 
     // Mock should NOT have been called a second time
     assert_eq!(

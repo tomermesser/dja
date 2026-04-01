@@ -105,9 +105,16 @@ impl SessionStats {
     }
 
     /// Record a P2P cache hit (response fetched from a peer instead of upstream).
-    pub fn record_p2p_hit(&self, response_size: usize) {
+    ///
+    /// Also accumulates `upstream_bytes_saved` and `response_bytes_saved` so the
+    /// ROI dashboard correctly accounts for bytes that never reached upstream.
+    pub fn record_p2p_hit(&self, request_body_size: usize, response_size: usize) {
         self.p2p_hits.fetch_add(1, Ordering::Relaxed);
         self.p2p_served
+            .fetch_add(response_size as u64, Ordering::Relaxed);
+        self.upstream_bytes_saved
+            .fetch_add(request_body_size as u64, Ordering::Relaxed);
+        self.response_bytes_saved
             .fetch_add(response_size as u64, Ordering::Relaxed);
     }
 

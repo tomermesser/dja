@@ -20,8 +20,13 @@ pub struct P2pHit {
 /// 3. Check peer is an active friend in local DB (no timeout needed)
 /// 4. Fetch response from peer (5 s timeout, hash-verified inside `fetch_response`)
 ///
-/// Returns `None` on any failure — P2P is purely additive, never blocks the
-/// normal cache-miss → upstream path.
+/// Returns:
+/// - `Ok(Some(hit))` — P2P hit, response bytes fetched successfully
+/// - `Ok(None)` — no matching entry found (index miss, peer not a friend, etc.)
+/// - `Err(_)` — a real error occurred (index error, resolve error, fetch error);
+///   the caller should increment `p2p_errors`.
+///
+/// P2P is purely additive — callers should fall through to upstream on any result.
 pub async fn p2p_lookup(
     index: &IndexClient,
     peer_client: &PeerClient,
@@ -32,7 +37,7 @@ pub async fn p2p_lookup(
     system_hash: &str,
     match_system_prompt: bool,
     threshold: f32,
-) -> Option<P2pHit> {
+) -> anyhow::Result<Option<P2pHit>> {
     // Step 1: Query central index with a 500 ms timeout.
     let index_hit = match tokio::time::timeout(
         Duration::from_millis(500),
@@ -50,15 +55,15 @@ pub async fn p2p_lookup(
         Ok(Ok(Some(hit))) => hit,
         Ok(Ok(None)) => {
             tracing::debug!("p2p: index returned no hit");
-            return None;
+            return Ok(None);
         }
         Ok(Err(e)) => {
             tracing::debug!(error = %e, "p2p: index query error");
-            return None;
+            return Err(anyhow::anyhow!("p2p index query error: {e}"));
         }
         Err(_) => {
             tracing::debug!("p2p: index query timed out");
-            return None;
+            return Err(anyhow::anyhow!("p2p index query timed out"));
         }
     };
 
@@ -77,28 +82,29 @@ pub async fn p2p_lookup(
         Ok(Ok(Some(info))) => info,
         Ok(Ok(None)) => {
             tracing::debug!(peer_id = %peer_id, "p2p: peer not found in index");
-            return None;
+            return Ok(None);
         }
         Ok(Err(e)) => {
             tracing::debug!(error = %e, "p2p: resolve_peer error");
-            return None;
+            return Err(anyhow::anyhow!("p2p resolve_peer error: {e}"));
         }
         Err(_) => {
             tracing::debug!(peer_id = %peer_id, "p2p: resolve_peer timed out");
-            return None;
+            return Err(anyhow::anyhow!("p2p resolve_peer timed out"));
         }
     };
 
     // Step 3: Check that the peer is an active friend in local DB.
+    // Not a friend is a normal "no match" condition, not an error.
     match db.is_active_friend(&peer_id).await {
         Ok(true) => {}
         Ok(false) => {
             tracing::debug!(peer_id = %peer_id, "p2p: peer is not an active friend, skipping");
-            return None;
+            return Ok(None);
         }
         Err(e) => {
             tracing::debug!(error = %e, "p2p: is_active_friend error");
-            return None;
+            return Err(anyhow::anyhow!("p2p is_active_friend error: {e}"));
         }
     }
 
@@ -109,15 +115,15 @@ pub async fn p2p_lookup(
     {
         Ok(data) => {
             tracing::info!(peer_id = %peer_id, content_hash = %content_hash, bytes = data.len(), "p2p: fetched response from peer");
-            Some(P2pHit {
+            Ok(Some(P2pHit {
                 data,
                 peer_id,
                 content_hash,
-            })
+            }))
         }
         Err(e) => {
             tracing::debug!(error = %e, peer_id = %peer_id, "p2p: fetch_response failed");
-            None
+            Err(anyhow::anyhow!("p2p fetch_response failed: {e}"))
         }
     }
 }
@@ -247,7 +253,10 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_none(), "should return None when index is empty");
+        assert!(
+            matches!(result, Ok(None)),
+            "should return Ok(None) when index is empty"
+        );
     }
 
     // ---------------------------------------------------------------------------
@@ -303,8 +312,8 @@ mod tests {
         .await;
 
         assert!(
-            result.is_none(),
-            "should return None when peer is not an active friend"
+            matches!(result, Ok(None)),
+            "should return Ok(None) when peer is not an active friend"
         );
     }
 
@@ -396,6 +405,8 @@ mod tests {
         // implementation with an in-memory DB. If the index returns no hit
         // (similarity below threshold), the test still validates the None path.
         // We assert on the structure if Some, or accept None gracefully.
+        // The lookup should never return Err here (all steps succeed).
+        let result = result.expect("p2p_lookup should not return Err when all steps succeed");
         if let Some(hit) = result {
             assert_eq!(hit.peer_id, "other-peer");
             assert_eq!(hit.content_hash, hash);
