@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::cache::CacheDb;
 use crate::config::Config;
 use crate::p2p::FriendStatus;
+use crate::p2p::client::PeerClient;
 
 // ---------------------------------------------------------------------------
 // Invite code payload
@@ -124,9 +125,21 @@ pub async fn run_add(code_or_peer_id: &str, addr: Option<&str>) -> Result<()> {
     }
     println!("  addr:      {}", public_addr);
 
-    // TODO(phase-3): call peer's POST /p2p/invite to perform mutual registration.
-    // Once PeerClient from Phase 3 is available:
-    //   PeerClient::new(&public_addr).register_self(&own_payload).await?;
+    // Phase 3: call peer's POST /p2p/invite to perform mutual registration.
+    let config = Config::load().unwrap_or_default();
+    let self_peer_id = &config.p2p.peer_id;
+    let own_display_name = &config.p2p.display_name;
+    let own_public_addr = &config.p2p.public_addr;
+
+    if !self_peer_id.is_empty() && !own_public_addr.is_empty() {
+        let peer_client = PeerClient::new();
+        if let Err(e) = peer_client
+            .send_invite(&public_addr, self_peer_id, own_display_name, own_public_addr)
+            .await
+        {
+            eprintln!("Warning: could not notify peer of invite (local add succeeded): {e}");
+        }
+    }
 
     Ok(())
 }
