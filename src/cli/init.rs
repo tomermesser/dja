@@ -2,6 +2,7 @@ use crate::cache::CacheDb;
 use crate::config::Config;
 use crate::embedding;
 use anyhow::Result;
+use uuid::Uuid;
 
 /// Run the `dja init` command.
 pub async fn run(global: bool) -> Result<()> {
@@ -9,12 +10,52 @@ pub async fn run(global: bool) -> Result<()> {
     Config::ensure_config_dir()?;
     let config_path = Config::config_path();
     if !config_path.exists() {
-        let default_config = Config::default();
+        let mut default_config = Config::default();
+
+        // Auto-generate a unique peer_id for this machine
+        default_config.p2p.peer_id = format!("dja_{}", &Uuid::new_v4().to_string()[..8]);
+
+        // Prompt for a display name
+        print!("Enter a display name for this peer (e.g. \"MacBook Pro\"): ");
+        use std::io::{self, Write};
+        io::stdout().flush()?;
+        let mut name = String::new();
+        io::stdin().read_line(&mut name)?;
+        let name = name.trim().to_string();
+        if !name.is_empty() {
+            default_config.p2p.display_name = name;
+        } else {
+            default_config.p2p.display_name = default_config.p2p.peer_id.clone();
+        }
+
         let toml_str = toml::to_string_pretty(&default_config)?;
         std::fs::write(&config_path, &toml_str)?;
-        println!("Created default config at {}", config_path.display());
+        println!("Created config at {}", config_path.display());
+        println!("P2P peer ID: {}", default_config.p2p.peer_id);
+        println!("Shared index: {}", default_config.p2p.index_url);
     } else {
-        println!("Config already exists at {}", config_path.display());
+        // Backfill peer_id if missing (existing installs upgrading to P2P)
+        let mut config = Config::load()?;
+        let mut changed = false;
+        if config.p2p.peer_id.is_empty() {
+            config.p2p.peer_id = format!("dja_{}", &Uuid::new_v4().to_string()[..8]);
+            changed = true;
+        }
+        if config.p2p.index_url.is_empty() {
+            config.p2p.index_url = env!("DJA_TURSO_URL").to_string();
+            changed = true;
+        }
+        if config.p2p.index_token.is_empty() {
+            config.p2p.index_token = env!("DJA_TURSO_TOKEN").to_string();
+            changed = true;
+        }
+        if changed {
+            let toml_str = toml::to_string_pretty(&config)?;
+            std::fs::write(&config_path, &toml_str)?;
+            println!("Updated config with P2P defaults at {}", config_path.display());
+        } else {
+            println!("Config already exists at {}", config_path.display());
+        }
     }
 
     // 2. Create data dir

@@ -27,8 +27,8 @@ impl Default for P2pConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            index_url: String::new(),
-            index_token: String::new(),
+            index_url: env!("DJA_TURSO_URL").to_string(),
+            index_token: env!("DJA_TURSO_TOKEN").to_string(),
             peer_id: String::new(),
             listen_port: 9843,
             display_name: String::new(),
