@@ -138,6 +138,7 @@ pub async fn run(config: Config, shutdown: impl Future<Output = ()> + Send + 'st
     let app = Router::new()
         .route("/internal/stats", get(internal::stats_handler))
         .route("/internal/events", get(internal::events_handler))
+        .route("/internal/p2p/friends", get(internal::p2p_friends_handler))
         .fallback(handler::proxy_handler)
         .with_state(state);
 

@@ -583,3 +583,160 @@ async fn test_cache_control_not_injected_when_disabled() {
         "system should remain a string when auto_cache_control is disabled, got: {:?}", system
     );
 }
+
+// ---------------------------------------------------------------------------
+// GET /internal/p2p/friends
+// ---------------------------------------------------------------------------
+
+/// Helper: spin up a minimal proxy with only the internal routes wired in (no
+/// embedding model needed) and return its base URL.
+async fn start_internal_only_server(cache: dja::cache::CacheDb) -> String {
+    use axum::routing::get;
+
+    let config = dja::config::Config {
+        port: 0,
+        upstream: "http://127.0.0.1:1".to_string(), // never reached
+        threshold: 0.95,
+        ttl: "30d".to_string(),
+        max_entries: 10000,
+        max_response_size: 102400,
+        log_level: "error".to_string(),
+        match_system_prompt: false,
+        multi_turn_caching: true,
+        auto_cache_control: true,
+        request_coalescing: true,
+        p2p: Default::default(),
+    };
+
+    let (event_tx, _rx) = dja::proxy::metrics::event_channel();
+
+    // We need a dummy embedding model. Use an empty Mutex to satisfy the type
+    // signature — these handlers never touch the embedding model.
+    // We can't easily construct EmbeddingModel without the model files, so we
+    // build the AppState with a real (but unused) model slot by relying on the
+    // fact that the internal handlers never access `state.embedding`.
+    //
+    // Workaround: build the state with an in-memory DB and skip the embedding
+    // field by building a full AppState with a try-load that falls back to a
+    // stub. Since we can't instantiate EmbeddingModel without files, we skip
+    // the embedding and use a separate minimal axum router that directly
+    // calls p2p_friends_handler with only the AppState fields it needs.
+    //
+    // The cleanest solution: build AppState and let the handler use only cache.
+    // We must supply an EmbeddingModel — attempt to load from default path and
+    // skip the test gracefully if the model is absent.
+    let model_dir = dja::embedding::download::default_model_dir().unwrap();
+    if !model_dir.join("model.onnx").exists() {
+        // Can't run without embedding model; signal caller to skip.
+        return String::new();
+    }
+    let embedding_model = dja::embedding::EmbeddingModel::load(&model_dir).unwrap();
+
+    let state = std::sync::Arc::new(dja::proxy::server::AppState {
+        config,
+        http_client: reqwest::Client::new(),
+        embedding: tokio::sync::Mutex::new(embedding_model),
+        cache,
+        stats: dja::proxy::metrics::SessionStats::new(),
+        event_tx,
+        inflight: dja::proxy::inflight::InflightMap::new(),
+        hostname: "test".to_string(),
+        p2p_client: None,
+        p2p_config: None,
+        p2p_index: None,
+    });
+
+    let app = axum::Router::new()
+        .route("/internal/p2p/friends", get(dja::proxy::internal::p2p_friends_handler))
+        .with_state(state);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("http://127.0.0.1:{}", addr.port());
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    url
+}
+
+#[tokio::test]
+async fn test_p2p_friends_endpoint_empty() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cache = dja::cache::CacheDb::open(&tmp.path().join("cache.db")).await.unwrap();
+    let base_url = start_internal_only_server(cache).await;
+    if base_url.is_empty() {
+        eprintln!("Skipping test_p2p_friends_endpoint_empty: embedding model not available.");
+        return;
+    }
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{base_url}/internal/p2p/friends"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let friends = body["friends"].as_array().unwrap();
+    assert!(friends.is_empty(), "Expected no friends, got: {friends:?}");
+}
+
+#[tokio::test]
+async fn test_p2p_friends_endpoint_with_data() {
+    use dja::p2p::friends::FriendStatus;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cache = dja::cache::CacheDb::open(&tmp.path().join("cache.db")).await.unwrap();
+
+    // Pre-populate friends.
+    cache
+        .add_friend("peer-alice", "Alice's Mac", "alice.tail:9843", FriendStatus::Active)
+        .await
+        .unwrap();
+    cache
+        .add_friend("peer-bob", "Bob's Workstation", "bob.tail:9843", FriendStatus::Active)
+        .await
+        .unwrap();
+    cache
+        .add_friend("peer-dave", "dave", "dave.tail:9843", FriendStatus::PendingSent)
+        .await
+        .unwrap();
+
+    let base_url = start_internal_only_server(cache).await;
+    if base_url.is_empty() {
+        eprintln!("Skipping test_p2p_friends_endpoint_with_data: embedding model not available.");
+        return;
+    }
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{base_url}/internal/p2p/friends"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let friends = body["friends"].as_array().unwrap();
+
+    assert_eq!(friends.len(), 3, "Expected 3 friends, got: {}", friends.len());
+
+    // Find Alice and verify fields.
+    let alice = friends
+        .iter()
+        .find(|f| f["peer_id"].as_str() == Some("peer-alice"))
+        .expect("Alice not found in response");
+    assert_eq!(alice["display_name"].as_str().unwrap(), "Alice's Mac");
+    assert_eq!(alice["public_addr"].as_str().unwrap(), "alice.tail:9843");
+    assert_eq!(alice["status"].as_str().unwrap(), "active");
+
+    // Verify Dave's pending_sent status is serialised correctly.
+    let dave = friends
+        .iter()
+        .find(|f| f["peer_id"].as_str() == Some("peer-dave"))
+        .expect("Dave not found in response");
+    assert_eq!(dave["status"].as_str().unwrap(), "pending_sent");
+}

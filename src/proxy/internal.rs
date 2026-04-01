@@ -30,6 +30,34 @@ pub async fn stats_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
     }))
 }
 
+/// GET /internal/p2p/friends — returns JSON list of friends from the cache DB.
+pub async fn p2p_friends_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match state.cache.list_friends().await {
+        Ok(friends) => {
+            let json_friends: Vec<serde_json::Value> = friends
+                .into_iter()
+                .map(|f| {
+                    serde_json::json!({
+                        "peer_id": f.peer_id,
+                        "display_name": f.display_name,
+                        "public_addr": f.public_addr,
+                        "status": f.status.to_string(),
+                    })
+                })
+                .collect();
+            Json(serde_json::json!({ "friends": json_friends })).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to list friends: {e}");
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "failed to list friends" })),
+            )
+                .into_response()
+        }
+    }
+}
+
 /// GET /internal/events — SSE stream of request events.
 pub async fn events_handler(
     State(state): State<Arc<AppState>>,

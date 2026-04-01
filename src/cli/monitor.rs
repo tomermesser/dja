@@ -36,6 +36,12 @@ struct StatsData {
     estimated_cost_saved_usd: f64,
     uptime_secs: u64,
     cache_entry_count: u64,
+    #[serde(default)]
+    p2p_hits: u64,
+    #[serde(default)]
+    p2p_served: u64,
+    #[serde(default)]
+    p2p_errors: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -58,6 +64,38 @@ struct EventData {
     source: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct FriendEntry {
+    peer_id: String,
+    display_name: String,
+    public_addr: String,
+    status: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct FriendsData {
+    friends: Vec<FriendEntry>,
+}
+
+// ---------------------------------------------------------------------------
+// Tab enum
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ActiveTab {
+    Dashboard,
+    P2PNetwork,
+}
+
+impl ActiveTab {
+    fn next(self) -> Self {
+        match self {
+            ActiveTab::Dashboard => ActiveTab::P2PNetwork,
+            ActiveTab::P2PNetwork => ActiveTab::Dashboard,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Monitor state
 // ---------------------------------------------------------------------------
@@ -65,7 +103,10 @@ struct EventData {
 struct MonitorState {
     stats: Option<StatsData>,
     events: Vec<EventData>, // newest first, max 100
+    friends: FriendsData,
     connected: bool,
+    active_tab: ActiveTab,
+    status_message: Option<String>,
 }
 
 impl MonitorState {
@@ -73,13 +114,24 @@ impl MonitorState {
         Self {
             stats: None,
             events: Vec::new(),
+            friends: FriendsData::default(),
             connected: false,
+            active_tab: ActiveTab::Dashboard,
+            status_message: None,
         }
     }
 
     fn push_event(&mut self, event: EventData) {
         self.events.insert(0, event);
         self.events.truncate(100);
+    }
+
+    /// Returns only the p2p_hit events from the event feed (newest first).
+    fn p2p_events(&self) -> Vec<&EventData> {
+        self.events
+            .iter()
+            .filter(|e| e.event_type.to_lowercase() == "p2p_hit")
+            .collect()
     }
 }
 
@@ -137,6 +189,7 @@ async fn run_monitor(
         .timeout(Duration::from_secs(5))
         .build()?;
     let stats_url = format!("http://127.0.0.1:{port}/internal/stats");
+    let friends_url = format!("http://127.0.0.1:{port}/internal/p2p/friends");
     let events_url = format!("http://127.0.0.1:{port}/internal/events");
 
     // Channel for SSE events coming from the background task.
@@ -151,11 +204,16 @@ async fn run_monitor(
     let mut render_interval = tokio::time::interval(Duration::from_millis(100));
     let mut stats_interval = tokio::time::interval(Duration::from_secs(2));
 
-    // Do an initial stats fetch right away.
+    // Do an initial stats + friends fetch right away.
     if let Ok(resp) = client.get(&stats_url).send().await {
         if let Ok(data) = resp.json::<StatsData>().await {
             state.stats = Some(data);
             state.connected = true;
+        }
+    }
+    if let Ok(resp) = client.get(&friends_url).send().await {
+        if let Ok(data) = resp.json::<FriendsData>().await {
+            state.friends = data;
         }
     }
 
@@ -165,11 +223,31 @@ async fn run_monitor(
                 // Check for keyboard events (non-blocking).
                 while event::poll(Duration::ZERO)? {
                     if let Event::Key(key) = event::read()? {
-                        if key.code == KeyCode::Char('q')
-                            || (key.code == KeyCode::Char('c')
-                                && key.modifiers.contains(KeyModifiers::CONTROL))
-                        {
-                            return Ok(());
+                        match key.code {
+                            KeyCode::Char('q') => return Ok(()),
+                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                return Ok(());
+                            }
+                            KeyCode::Tab | KeyCode::BackTab => {
+                                state.active_tab = state.active_tab.next();
+                                state.status_message = None;
+                            }
+                            KeyCode::Char('1') => {
+                                state.active_tab = ActiveTab::Dashboard;
+                                state.status_message = None;
+                            }
+                            KeyCode::Char('2') => {
+                                state.active_tab = ActiveTab::P2PNetwork;
+                                state.status_message = None;
+                            }
+                            KeyCode::Char('i') if state.active_tab == ActiveTab::P2PNetwork => {
+                                // Show the local peer_id as a pseudo invite code.
+                                // In the real system this would generate an invite token.
+                                state.status_message = Some(
+                                    "Invite: share your peer_id from `dja p2p invite`".to_string(),
+                                );
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -185,6 +263,12 @@ async fn run_monitor(
                     }
                     Err(_) => {
                         state.connected = false;
+                    }
+                }
+                // Also refresh the friends list on every stats tick.
+                if let Ok(resp) = client.get(&friends_url).send().await {
+                    if let Ok(data) = resp.json::<FriendsData>().await {
+                        state.friends = data;
                     }
                 }
             }
@@ -251,22 +335,26 @@ fn extract_sse_data(message: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Rendering
+// Top-level rendering
 // ---------------------------------------------------------------------------
 
 fn render(f: &mut Frame, state: &MonitorState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // header
-            Constraint::Length(6), // stats panel
-            Constraint::Min(3),   // live feed
+            Constraint::Length(1), // header / status bar
+            Constraint::Length(2), // tab bar
+            Constraint::Min(3),    // tab content
         ])
         .split(f.area());
 
     render_header(f, chunks[0], state);
-    render_stats(f, chunks[1], state);
-    render_live_feed(f, chunks[2], state);
+    render_tabs(f, chunks[1], state);
+
+    match state.active_tab {
+        ActiveTab::Dashboard => render_dashboard(f, chunks[2], state),
+        ActiveTab::P2PNetwork => render_p2p_tab(f, chunks[2], state),
+    }
 }
 
 fn render_header(f: &mut Frame, area: Rect, state: &MonitorState) {
@@ -291,16 +379,79 @@ fn render_header(f: &mut Frame, area: Rect, state: &MonitorState) {
         Span::styled("●", Style::default().fg(Color::Red))
     };
 
-    let header = Line::from(vec![
-        Span::styled(" dja monitor ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        status_dot,
-        Span::raw("  "),
-        Span::styled(format!("uptime: {uptime_str}"), Style::default().fg(Color::White)),
-        Span::raw("   "),
-        Span::styled(format!("cache: {cache_str}"), Style::default().fg(Color::Cyan)),
-    ]);
+    // If there's a status message (e.g. from 'i' key), show it on the right.
+    let right_part: Vec<Span> = if let Some(msg) = &state.status_message {
+        vec![
+            Span::raw("   "),
+            Span::styled(msg.as_str(), Style::default().fg(Color::Yellow)),
+        ]
+    } else {
+        vec![
+            Span::raw("   "),
+            Span::styled(format!("uptime: {uptime_str}"), Style::default().fg(Color::White)),
+            Span::raw("   "),
+            Span::styled(format!("cache: {cache_str}"), Style::default().fg(Color::Cyan)),
+        ]
+    };
 
+    let mut spans = vec![
+        Span::styled(
+            " dja monitor ",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ),
+        status_dot,
+    ];
+    spans.extend(right_part);
+
+    let header = Line::from(spans);
     f.render_widget(Paragraph::new(header), area);
+}
+
+fn render_tabs(f: &mut Frame, area: Rect, state: &MonitorState) {
+    let titles = vec![
+        Span::styled(
+            " 1 Dashboard ",
+            if state.active_tab == ActiveTab::Dashboard {
+                Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            },
+        ),
+        Span::styled(
+            " 2 P2P Network ",
+            if state.active_tab == ActiveTab::P2PNetwork {
+                Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            },
+        ),
+    ];
+
+    let tab_line = Line::from(
+        titles
+            .into_iter()
+            .flat_map(|s| vec![s, Span::raw("  ")])
+            .collect::<Vec<_>>(),
+    );
+
+    f.render_widget(Paragraph::new(tab_line), area);
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard tab (original view)
+// ---------------------------------------------------------------------------
+
+fn render_dashboard(f: &mut Frame, area: Rect, state: &MonitorState) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(6), // stats panel
+            Constraint::Min(3),    // live feed
+        ])
+        .split(area);
+
+    render_stats(f, chunks[0], state);
+    render_live_feed(f, chunks[1], state);
 }
 
 fn render_stats(f: &mut Frame, area: Rect, state: &MonitorState) {
@@ -487,6 +638,231 @@ fn render_live_feed(f: &mut Frame, area: Rect, state: &MonitorState) {
 }
 
 // ---------------------------------------------------------------------------
+// P2P Network tab
+// ---------------------------------------------------------------------------
+
+fn render_p2p_tab(f: &mut Frame, area: Rect, state: &MonitorState) {
+    // Layout: friends list | pending | p2p stats | activity
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(5),    // friends + pending
+            Constraint::Length(3), // p2p stats
+            Constraint::Min(4),    // activity feed
+        ])
+        .split(area);
+
+    render_friends_panel(f, chunks[0], state);
+    render_p2p_stats(f, chunks[1], state);
+    render_p2p_activity(f, chunks[2], state);
+}
+
+fn render_friends_panel(f: &mut Frame, area: Rect, state: &MonitorState) {
+    let friends = &state.friends.friends;
+
+    let active: Vec<&FriendEntry> = friends
+        .iter()
+        .filter(|f| f.status == "active")
+        .collect();
+
+    let pending: Vec<&FriendEntry> = friends
+        .iter()
+        .filter(|f| f.status == "pending_sent" || f.status == "pending_received")
+        .collect();
+
+    // Split horizontally — active on left, pending on right.
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .split(area);
+
+    // --- Active friends ---
+    let friends_title = format!(" Friends ({}) ", active.len());
+    let friends_block = Block::default()
+        .title(Span::styled(
+            friends_title,
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+
+    let friends_inner = friends_block.inner(cols[0]);
+    f.render_widget(friends_block, cols[0]);
+
+    if active.is_empty() {
+        let msg = Paragraph::new(Span::styled(
+            " No active friends yet. Use `dja p2p add`.",
+            Style::default().fg(Color::DarkGray),
+        ));
+        f.render_widget(msg, friends_inner);
+    } else {
+        let rows: Vec<Row> = active
+            .iter()
+            .map(|f| {
+                Row::new(vec![
+                    Span::styled("●", Style::default().fg(Color::Green)).to_string(),
+                    f.display_name.clone(),
+                    f.public_addr.clone(),
+                    "active".to_string(),
+                ])
+                .style(Style::default().fg(Color::White))
+            })
+            .collect();
+
+        let widths = [
+            Constraint::Length(2),  // bullet
+            Constraint::Min(20),    // name
+            Constraint::Min(22),    // addr
+            Constraint::Length(8),  // status
+        ];
+        let table = Table::new(rows, widths);
+        f.render_widget(table, friends_inner);
+    }
+
+    // --- Pending ---
+    let pending_block = Block::default()
+        .title(Span::styled(
+            " Pending ",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+
+    let pending_inner = pending_block.inner(cols[1]);
+    f.render_widget(pending_block, cols[1]);
+
+    if pending.is_empty() {
+        let msg = Paragraph::new(Span::styled(
+            " No pending invites.",
+            Style::default().fg(Color::DarkGray),
+        ));
+        f.render_widget(msg, pending_inner);
+    } else {
+        let rows: Vec<Row> = pending
+            .iter()
+            .map(|f| {
+                let (arrow, status_color) = if f.status == "pending_sent" {
+                    ("→", Color::Yellow)
+                } else {
+                    ("←", Color::Cyan)
+                };
+                Row::new(vec![
+                    arrow.to_string(),
+                    f.display_name.clone(),
+                    format!("({})", f.peer_id.chars().take(8).collect::<String>()),
+                    f.status.replace('_', " "),
+                ])
+                .style(Style::default().fg(status_color))
+            })
+            .collect();
+
+        let widths = [
+            Constraint::Length(2),  // arrow
+            Constraint::Min(14),    // name
+            Constraint::Length(10), // short peer_id
+            Constraint::Min(16),    // status
+        ];
+        let table = Table::new(rows, widths);
+        f.render_widget(table, pending_inner);
+    }
+}
+
+fn render_p2p_stats(f: &mut Frame, area: Rect, state: &MonitorState) {
+    let block = Block::default()
+        .title(Span::styled(
+            " P2P Stats ",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let (hits, served, errors) = match &state.stats {
+        Some(s) => (s.p2p_hits, s.p2p_served, s.p2p_errors),
+        None => (0, 0, 0),
+    };
+
+    let line = Line::from(vec![
+        Span::raw("  "),
+        Span::styled("Hits: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{hits}"), Style::default().fg(Color::Green)),
+        Span::raw("    "),
+        Span::styled("Served: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{}", format_bytes(served)), Style::default().fg(Color::Cyan)),
+        Span::raw("    "),
+        Span::styled("Errors: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{errors}"),
+            if errors > 0 {
+                Style::default().fg(Color::Red)
+            } else {
+                Style::default().fg(Color::White)
+            },
+        ),
+    ]);
+
+    f.render_widget(Paragraph::new(line), inner);
+}
+
+fn render_p2p_activity(f: &mut Frame, area: Rect, state: &MonitorState) {
+    let block = Block::default()
+        .title(Span::styled(
+            " P2P Activity ",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let p2p_events = state.p2p_events();
+
+    if p2p_events.is_empty() {
+        let msg = Paragraph::new(Span::styled(
+            " No P2P activity yet.",
+            Style::default().fg(Color::DarkGray),
+        ));
+        f.render_widget(msg, inner);
+        return;
+    }
+
+    let max_rows = inner.height as usize;
+    let visible = &p2p_events[..p2p_events.len().min(max_rows)];
+
+    let rows: Vec<Row> = visible
+        .iter()
+        .map(|ev| {
+            let time_str = format_timestamp(&ev.timestamp);
+            let snippet = ev
+                .prompt_snippet
+                .as_deref()
+                .unwrap_or("")
+                .chars()
+                .take(45)
+                .collect::<String>();
+            let snippet_display = format!("\"{snippet}\"");
+            let source_str = ev.source.as_deref().unwrap_or("unknown").to_string();
+
+            Row::new(vec![time_str, "p2p_hit".to_string(), snippet_display, source_str])
+                .style(Style::default().fg(Color::Cyan))
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Length(8),  // time
+        Constraint::Length(8),  // type
+        Constraint::Min(20),   // snippet
+        Constraint::Length(18), // source
+    ];
+
+    let table = Table::new(rows, widths);
+    f.render_widget(table, inner);
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -496,6 +872,7 @@ fn event_color(event_type: &str) -> Color {
         "miss" => Color::Yellow,
         "skip" => Color::DarkGray,
         "error" => Color::Red,
+        "p2p_hit" => Color::Cyan,
         _ => Color::White,
     }
 }
@@ -565,5 +942,15 @@ fn format_tokens(tokens: u64) -> String {
         format!("{:.1}K", tokens as f64 / 1_000.0)
     } else {
         format!("{tokens}")
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1_000_000 {
+        format!("{:.1}MB", bytes as f64 / 1_000_000.0)
+    } else if bytes >= 1_000 {
+        format!("{:.1}KB", bytes as f64 / 1_000.0)
+    } else {
+        format!("{bytes}B")
     }
 }
