@@ -204,6 +204,7 @@ async fn test_proxy_non_streaming_cache_hit() {
         hostname: "test".to_string(),
         p2p_client: None,
         p2p_config: None,
+        p2p_index: None,
     });
 
     let app = axum::Router::new()
@@ -316,6 +317,7 @@ async fn test_proxy_streaming_cache_hit() {
         hostname: "test".to_string(),
         p2p_client: None,
         p2p_config: None,
+        p2p_index: None,
     });
 
     let app = axum::Router::new()
@@ -429,6 +431,7 @@ async fn test_cache_control_injected_on_miss() {
         hostname: "test".to_string(),
         p2p_client: None,
         p2p_config: None,
+        p2p_index: None,
     });
 
     let app = axum::Router::new()
@@ -536,6 +539,7 @@ async fn test_cache_control_not_injected_when_disabled() {
         hostname: "test".to_string(),
         p2p_client: None,
         p2p_config: None,
+        p2p_index: None,
     });
 
     let app = axum::Router::new()

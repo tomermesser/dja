@@ -2,6 +2,7 @@ use crate::cache::CacheDb;
 use crate::config::Config;
 use crate::embedding::EmbeddingModel;
 use crate::p2p::client::PeerClient;
+use crate::p2p::index::IndexClient;
 use crate::p2p::server::{start_peer_server, PeerServerState};
 use crate::config::P2pConfig;
 use crate::proxy::handler;
@@ -9,6 +10,7 @@ use crate::proxy::inflight::InflightMap;
 use crate::proxy::internal;
 use crate::proxy::metrics::{self, SessionStats};
 use anyhow::{Context, Result};
+use libsql;
 use axum::routing::get;
 use axum::Router;
 use std::future::Future;
@@ -44,6 +46,8 @@ pub struct AppState {
     pub p2p_client: Option<Arc<PeerClient>>,
     /// P2P configuration, present when P2P is enabled.
     pub p2p_config: Option<Arc<P2pConfig>>,
+    /// P2P central index client, present when P2P is enabled.
+    pub p2p_index: Option<Arc<IndexClient>>,
 }
 
 /// Start the proxy server and run until the shutdown signal fires.
@@ -70,11 +74,31 @@ pub async fn run(config: Config, shutdown: impl Future<Output = ()> + Send + 'st
     let (event_tx, _rx) = metrics::event_channel();
 
     // Build optional P2P state
-    let (p2p_client, p2p_config) = if config.p2p.enabled {
+    let (p2p_client, p2p_config, p2p_index) = if config.p2p.enabled {
         let p2p_cfg = Arc::new(config.p2p.clone());
-        (Some(Arc::new(PeerClient::new())), Some(p2p_cfg))
+
+        // Open a Turso (or local) connection for the central index.
+        let index_conn = if p2p_cfg.index_url.is_empty() {
+            // Fallback to in-memory DB when no Turso URL is configured (dev/test).
+            libsql::Builder::new_local(":memory:")
+                .build()
+                .await
+                .context("Failed to open in-memory index DB")?
+                .connect()
+                .context("Failed to connect to in-memory index DB")?
+        } else {
+            libsql::Builder::new_remote(p2p_cfg.index_url.clone(), p2p_cfg.index_token.clone())
+                .build()
+                .await
+                .context("Failed to open Turso index DB")?
+                .connect()
+                .context("Failed to connect to Turso index DB")?
+        };
+
+        let index = Arc::new(IndexClient::new(index_conn));
+        (Some(Arc::new(PeerClient::new())), Some(p2p_cfg), Some(index))
     } else {
-        (None, None)
+        (None, None, None)
     };
 
     let state = Arc::new(AppState {
@@ -88,6 +112,7 @@ pub async fn run(config: Config, shutdown: impl Future<Output = ()> + Send + 'st
         hostname: get_local_hostname(),
         p2p_client,
         p2p_config: p2p_config.clone(),
+        p2p_index,
     });
 
     // Spawn peer server as a background task when P2P is enabled

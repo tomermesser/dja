@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::p2p::lookup::p2p_lookup;
 use crate::proxy::cache_control;
 use crate::proxy::eligibility;
 use crate::proxy::forward;
@@ -216,10 +217,93 @@ async fn handle_messages_request(
                 .expect("building cached response"))
         }
         None => {
-            // Cache MISS
+            // Cache MISS — try P2P before request coalescing / upstream.
             let snippet: String = parsed.user_message.chars().take(80).collect();
             let latency_ms = start.elapsed().as_millis() as u64;
             tracing::info!(prompt_snippet = %snippet, "cache MISS");
+
+            // --- P2P lookup ---
+            if let (Some(p2p_index), Some(p2p_client), Some(p2p_config)) = (
+                state.p2p_index.as_ref(),
+                state.p2p_client.as_ref(),
+                state.p2p_config.as_ref(),
+            ) {
+                if let Some(p2p_hit) = p2p_lookup(
+                    p2p_index,
+                    p2p_client,
+                    &state.cache,
+                    p2p_config,
+                    &embedding,
+                    &parsed.model,
+                    &parsed.system_hash,
+                    state.config.match_system_prompt,
+                    state.config.threshold as f32,
+                )
+                .await
+                {
+                    let p2p_latency_ms = start.elapsed().as_millis() as u64;
+                    let response_size = p2p_hit.data.len();
+                    let source = format!("p2p:{}", p2p_hit.peer_id);
+
+                    tracing::info!(
+                        peer_id = %p2p_hit.peer_id,
+                        content_hash = %p2p_hit.content_hash,
+                        response_size,
+                        "P2P HIT: serving response from peer"
+                    );
+
+                    state.stats.record_p2p_hit(response_size);
+                    let _ = state.event_tx.send(RequestEvent {
+                        event_type: "p2p_hit".to_string(),
+                        latency_ms: Some(p2p_latency_ms),
+                        prompt_snippet: Some(snippet),
+                        model: Some(parsed.model.clone()),
+                        similarity: None,
+                        cache_id: None,
+                        body_size,
+                        response_size: Some(response_size),
+                        timestamp: metrics::now_timestamp(),
+                        source: Some(source.clone()),
+                    });
+
+                    // Store in local cache so future lookups hit locally.
+                    let store_result = state
+                        .cache
+                        .store(
+                            &parsed.user_message,
+                            &parsed.system_hash,
+                            &parsed.model,
+                            &embedding,
+                            &p2p_hit.data,
+                            &source,
+                        )
+                        .await;
+                    if let Err(e) = store_result {
+                        tracing::warn!(error = %e, "P2P: failed to store fetched response locally");
+                    }
+
+                    let content_type = if parsed.is_streaming {
+                        "text/event-stream"
+                    } else {
+                        "application/json"
+                    };
+                    let mut builder = Response::builder()
+                        .status(200)
+                        .header("content-type", content_type);
+
+                    if p2p_hit.data.len() >= 2
+                        && p2p_hit.data[0] == 0x1f
+                        && p2p_hit.data[1] == 0x8b
+                    {
+                        builder = builder.header("content-encoding", "gzip");
+                    }
+
+                    return Ok(builder
+                        .body(Body::from(p2p_hit.data))
+                        .expect("building p2p response"));
+                }
+            }
+            // --- end P2P lookup ---
 
             // Request coalescing: if an identical request is already in-flight,
             // wait for it to complete and retry cache lookup instead of sending
@@ -349,7 +433,7 @@ async fn handle_messages_request(
                             Ok(buffer) => {
                                 let response_size = buffer.len();
                                 if response_size <= max_response_size {
-                                    if let Err(e) = state_bg
+                                    match state_bg
                                         .cache
                                         .store(
                                             &user_message,
@@ -361,9 +445,30 @@ async fn handle_messages_request(
                                         )
                                         .await
                                     {
-                                        tracing::warn!(error = %e, "cache ERROR: failed to store streamed response");
-                                    } else {
-                                        tracing::debug!(response_size, "cached streamed response stored");
+                                        Err(e) => {
+                                            tracing::warn!(error = %e, "cache ERROR: failed to store streamed response");
+                                        }
+                                        Ok(_) => {
+                                            tracing::debug!(response_size, "cached streamed response stored");
+                                            // Fire-and-forget: publish to central index.
+                                            if let (Some(index), Some(p2p_cfg)) = (
+                                                state_bg.p2p_index.as_ref(),
+                                                state_bg.p2p_config.as_ref(),
+                                            ) {
+                                                use sha2::{Digest, Sha256};
+                                                let content_hash = hex::encode(Sha256::digest(&buffer));
+                                                let _ = index
+                                                    .publish(
+                                                        &p2p_cfg.peer_id,
+                                                        &content_hash,
+                                                        &model,
+                                                        &system_hash,
+                                                        &embedding,
+                                                        response_size,
+                                                    )
+                                                    .await;
+                                            }
+                                        }
                                     }
                                 } else {
                                     tracing::debug!(
@@ -396,7 +501,7 @@ async fn handle_messages_request(
 
                 if status.is_success() && response_size <= state.config.max_response_size {
                     // Store in cache (fire-and-forget error handling)
-                    if let Err(e) = state
+                    match state
                         .cache
                         .store(
                             &parsed.user_message,
@@ -408,9 +513,36 @@ async fn handle_messages_request(
                         )
                         .await
                     {
-                        tracing::warn!(error = %e, "cache ERROR: failed to store response");
-                    } else {
-                        tracing::debug!(response_size, "cached response stored");
+                        Err(e) => {
+                            tracing::warn!(error = %e, "cache ERROR: failed to store response");
+                        }
+                        Ok(_) => {
+                            tracing::debug!(response_size, "cached response stored");
+                            // Fire-and-forget: publish to central index.
+                            if let (Some(index), Some(p2p_cfg)) = (
+                                state.p2p_index.as_ref(),
+                                state.p2p_config.as_ref(),
+                            ) {
+                                use sha2::{Digest, Sha256};
+                                let content_hash = hex::encode(Sha256::digest(&response_bytes));
+                                let index = Arc::clone(index);
+                                let p2p_cfg = Arc::clone(p2p_cfg);
+                                let model = parsed.model.clone();
+                                let system_hash = parsed.system_hash.clone();
+                                tokio::spawn(async move {
+                                    let _ = index
+                                        .publish(
+                                            &p2p_cfg.peer_id,
+                                            &content_hash,
+                                            &model,
+                                            &system_hash,
+                                            &embedding,
+                                            response_size,
+                                        )
+                                        .await;
+                                });
+                            }
+                        }
                     }
                 } else if !status.is_success() {
                     tracing::debug!(status = %status, "not caching non-success response");

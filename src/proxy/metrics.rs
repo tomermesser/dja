@@ -31,6 +31,12 @@ pub struct SessionStats {
     pub upstream_bytes_saved: AtomicU64,
     pub response_bytes_saved: AtomicU64,
     pub total_miss_latency_ms: AtomicU64,
+    /// Number of local-cache misses that were satisfied by a P2P peer.
+    pub p2p_hits: AtomicU64,
+    /// Total bytes served from P2P peers.
+    pub p2p_served: AtomicU64,
+    /// Number of P2P lookup or fetch errors.
+    pub p2p_errors: AtomicU64,
 }
 
 impl SessionStats {
@@ -46,6 +52,9 @@ impl SessionStats {
             upstream_bytes_saved: AtomicU64::new(0),
             response_bytes_saved: AtomicU64::new(0),
             total_miss_latency_ms: AtomicU64::new(0),
+            p2p_hits: AtomicU64::new(0),
+            p2p_served: AtomicU64::new(0),
+            p2p_errors: AtomicU64::new(0),
         }
     }
 
@@ -93,6 +102,18 @@ impl SessionStats {
             .fetch_add(body_size as u64, Ordering::Relaxed);
         self.response_bytes_saved
             .fetch_add(response_size as u64, Ordering::Relaxed);
+    }
+
+    /// Record a P2P cache hit (response fetched from a peer instead of upstream).
+    pub fn record_p2p_hit(&self, response_size: usize) {
+        self.p2p_hits.fetch_add(1, Ordering::Relaxed);
+        self.p2p_served
+            .fetch_add(response_size as u64, Ordering::Relaxed);
+    }
+
+    /// Record a P2P lookup or fetch error.
+    pub fn record_p2p_error(&self) {
+        self.p2p_errors.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Seconds since the session started.

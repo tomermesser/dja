@@ -24,6 +24,9 @@ pub async fn stats_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
         "estimated_cost_saved_usd": stats.estimated_cost_saved_usd(),
         "uptime_secs": stats.uptime_secs(),
         "cache_entry_count": entry_count,
+        "p2p_hits": stats.p2p_hits.load(Ordering::Relaxed),
+        "p2p_served": stats.p2p_served.load(Ordering::Relaxed),
+        "p2p_errors": stats.p2p_errors.load(Ordering::Relaxed),
     }))
 }
 
