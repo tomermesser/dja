@@ -9,7 +9,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Gauge, Paragraph, Row, Table},
+    widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table},
     Frame, Terminal,
 };
 use serde::Deserialize;
@@ -42,6 +42,8 @@ struct StatsData {
     p2p_served: u64,
     #[serde(default)]
     p2p_errors: u64,
+    #[serde(default)]
+    p2p_enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -107,6 +109,7 @@ struct MonitorState {
     connected: bool,
     active_tab: ActiveTab,
     status_message: Option<String>,
+    friends_error: bool,
 }
 
 impl MonitorState {
@@ -118,6 +121,7 @@ impl MonitorState {
             connected: false,
             active_tab: ActiveTab::Dashboard,
             status_message: None,
+            friends_error: false,
         }
     }
 
@@ -211,10 +215,19 @@ async fn run_monitor(
             state.connected = true;
         }
     }
-    if let Ok(resp) = client.get(&friends_url).send().await {
-        if let Ok(data) = resp.json::<FriendsData>().await {
-            state.friends = data;
+    match client.get(&friends_url).send().await {
+        Ok(resp) => {
+            match resp.json::<FriendsData>().await {
+                Ok(data) => {
+                    state.friends = data;
+                    state.friends_error = false;
+                }
+                Err(_) => {
+                    state.friends_error = true;
+                }
+            }
         }
+        Err(_) => {} // network failure is OK at startup
     }
 
     loop {
@@ -267,8 +280,14 @@ async fn run_monitor(
                 }
                 // Also refresh the friends list on every stats tick.
                 if let Ok(resp) = client.get(&friends_url).send().await {
-                    if let Ok(data) = resp.json::<FriendsData>().await {
-                        state.friends = data;
+                    match resp.json::<FriendsData>().await {
+                        Ok(data) => {
+                            state.friends = data;
+                            state.friends_error = false;
+                        }
+                        Err(_) => {
+                            state.friends_error = true;
+                        }
                     }
                 }
             }
@@ -284,7 +303,10 @@ async fn run_monitor(
 // ---------------------------------------------------------------------------
 
 async fn connect_sse(url: String, tx: mpsc::Sender<EventData>) {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_default();
 
     loop {
         match client.get(&url).send().await {
@@ -345,6 +367,7 @@ fn render(f: &mut Frame, state: &MonitorState) {
             Constraint::Length(1), // header / status bar
             Constraint::Length(2), // tab bar
             Constraint::Min(3),    // tab content
+            Constraint::Length(1), // footer / keyboard shortcuts
         ])
         .split(f.area());
 
@@ -355,6 +378,21 @@ fn render(f: &mut Frame, state: &MonitorState) {
         ActiveTab::Dashboard => render_dashboard(f, chunks[2], state),
         ActiveTab::P2PNetwork => render_p2p_tab(f, chunks[2], state),
     }
+
+    render_footer(f, chunks[3], state);
+}
+
+fn render_footer(f: &mut Frame, area: Rect, state: &MonitorState) {
+    let shortcuts = if state.active_tab == ActiveTab::P2PNetwork {
+        "q: quit  Tab: switch tab  1: Dashboard  2: P2P  i: invite code"
+    } else {
+        "q: quit  Tab: switch tab  1: Dashboard  2: P2P"
+    };
+    let footer = Paragraph::new(Span::styled(
+        shortcuts,
+        Style::default().fg(Color::DarkGray),
+    ));
+    f.render_widget(footer, area);
 }
 
 fn render_header(f: &mut Frame, area: Rect, state: &MonitorState) {
@@ -633,7 +671,10 @@ fn render_live_feed(f: &mut Frame, area: Rect, state: &MonitorState) {
         Constraint::Length(16), // source
     ];
 
-    let table = Table::new(rows, widths);
+    let header = Row::new(vec!["Time", "Type", "Latency", "Snippet", "Model", "Source"])
+        .style(Style::default().add_modifier(Modifier::UNDERLINED).fg(Color::DarkGray));
+
+    let table = Table::new(rows, widths).header(header);
     f.render_widget(table, inner);
 }
 
@@ -642,19 +683,69 @@ fn render_live_feed(f: &mut Frame, area: Rect, state: &MonitorState) {
 // ---------------------------------------------------------------------------
 
 fn render_p2p_tab(f: &mut Frame, area: Rect, state: &MonitorState) {
-    // Layout: friends list | pending | p2p stats | activity
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
+    // If P2P is disabled, show an informational message.
+    let p2p_enabled = state.stats.as_ref().map(|s| s.p2p_enabled).unwrap_or(false);
+    if !p2p_enabled {
+        let msg = Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "  P2P is disabled.",
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                "  Set p2p.enabled = true in ~/.config/dja/config.toml to get started.",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ])
+        .block(
+            Block::default()
+                .title(Span::styled(
+                    " P2P Network ",
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        );
+        f.render_widget(msg, area);
+        return;
+    }
+
+    // Layout: optional error warning | friends list | p2p stats | activity
+    let has_error = state.friends_error;
+    let constraints = if has_error {
+        vec![
+            Constraint::Length(1), // friends error warning
             Constraint::Min(5),    // friends + pending
             Constraint::Length(3), // p2p stats
             Constraint::Min(4),    // activity feed
-        ])
+        ]
+    } else {
+        vec![
+            Constraint::Min(5),    // friends + pending
+            Constraint::Length(3), // p2p stats
+            Constraint::Min(4),    // activity feed
+        ]
+    };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
         .split(area);
 
-    render_friends_panel(f, chunks[0], state);
-    render_p2p_stats(f, chunks[1], state);
-    render_p2p_activity(f, chunks[2], state);
+    if has_error {
+        let warning = Paragraph::new(Span::styled(
+            "  \u{26a0} Friends list unavailable (DB error)",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ));
+        f.render_widget(warning, chunks[0]);
+        render_friends_panel(f, chunks[1], state);
+        render_p2p_stats(f, chunks[2], state);
+        render_p2p_activity(f, chunks[3], state);
+    } else {
+        render_friends_panel(f, chunks[0], state);
+        render_p2p_stats(f, chunks[1], state);
+        render_p2p_activity(f, chunks[2], state);
+    }
 }
 
 fn render_friends_panel(f: &mut Frame, area: Rect, state: &MonitorState) {
@@ -700,10 +791,10 @@ fn render_friends_panel(f: &mut Frame, area: Rect, state: &MonitorState) {
             .iter()
             .map(|f| {
                 Row::new(vec![
-                    Span::styled("●", Style::default().fg(Color::Green)).to_string(),
-                    f.display_name.clone(),
-                    f.public_addr.clone(),
-                    "active".to_string(),
+                    Cell::from(Span::styled("●", Style::default().fg(Color::Green))),
+                    Cell::from(f.display_name.as_str()),
+                    Cell::from(f.public_addr.as_str()),
+                    Cell::from("active"),
                 ])
                 .style(Style::default().fg(Color::White))
             })
@@ -746,11 +837,13 @@ fn render_friends_panel(f: &mut Frame, area: Rect, state: &MonitorState) {
                 } else {
                     ("←", Color::Cyan)
                 };
+                let short_id = format!("({})", f.peer_id.chars().take(8).collect::<String>());
+                let status_display = f.status.replace('_', " ");
                 Row::new(vec![
-                    arrow.to_string(),
-                    f.display_name.clone(),
-                    format!("({})", f.peer_id.chars().take(8).collect::<String>()),
-                    f.status.replace('_', " "),
+                    Cell::from(Span::styled(arrow, Style::default().fg(status_color))),
+                    Cell::from(f.display_name.as_str()),
+                    Cell::from(short_id),
+                    Cell::from(status_display),
                 ])
                 .style(Style::default().fg(status_color))
             })
@@ -858,7 +951,10 @@ fn render_p2p_activity(f: &mut Frame, area: Rect, state: &MonitorState) {
         Constraint::Length(18), // source
     ];
 
-    let table = Table::new(rows, widths);
+    let header = Row::new(vec!["Time", "Event", "Details", "Source"])
+        .style(Style::default().add_modifier(Modifier::UNDERLINED).fg(Color::DarkGray));
+
+    let table = Table::new(rows, widths).header(header);
     f.render_widget(table, inner);
 }
 
@@ -893,35 +989,18 @@ fn shorten_model(model: &str) -> String {
 
 fn format_timestamp(ts: &str) -> String {
     if let Ok(secs) = ts.parse::<u64>() {
-        // Convert unix timestamp to HH:MM:SS local time.
-        let dt = std::time::UNIX_EPOCH + Duration::from_secs(secs);
-        if let Ok(elapsed) = dt.elapsed() {
-            // We have a past timestamp, compute what local time it was.
-            let now_secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let local_secs = secs; // This is already UTC epoch seconds.
-            // Simple HH:MM:SS from epoch — we want local time.
-            // Use a basic approach: get total seconds of day.
-            let _ = elapsed; // suppress unused
-            let _ = now_secs;
-            // For simplicity, compute using libc localtime.
-            return format_epoch_local(local_secs);
-        }
         return format_epoch_local(secs);
     }
     ts.chars().take(8).collect()
 }
 
 fn format_epoch_local(epoch_secs: u64) -> String {
-    let secs = epoch_secs as i64;
-    let tm = unsafe {
-        let mut result: libc::tm = std::mem::zeroed();
-        libc::localtime_r(&secs as *const i64, &mut result);
-        result
-    };
-    format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
+    // Simple UTC time display using modular arithmetic (no unsafe, no external deps)
+    let secs = epoch_secs % 86400;
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    format!("{:02}:{:02}:{:02}", h, m, s)
 }
 
 fn format_time_saved(ms: u64) -> String {

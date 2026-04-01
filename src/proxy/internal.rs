@@ -27,6 +27,7 @@ pub async fn stats_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
         "p2p_hits": stats.p2p_hits.load(Ordering::Relaxed),
         "p2p_served": stats.p2p_served.load(Ordering::Relaxed),
         "p2p_errors": stats.p2p_errors.load(Ordering::Relaxed),
+        "p2p_enabled": state.p2p_client.is_some(),
     }))
 }
 
