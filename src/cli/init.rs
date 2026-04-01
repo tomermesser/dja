@@ -72,31 +72,30 @@ pub async fn run(global: bool) -> Result<()> {
     let _db = CacheDb::open(&db_path).await?;
     println!("Database initialized at {}", db_path.display());
 
-    // 5. Print setup instructions
+    // 5. Install shell integration
     let config = Config::load()?;
     println!();
-    println!("Setup complete! To use dja, set your base URL:");
-    println!();
-    println!(
-        "  export ANTHROPIC_BASE_URL=http://127.0.0.1:{}",
-        config.port
-    );
-    println!();
-
-    // 6. If --global, append to shell profile
     if global {
-        append_to_shell_profile(config.port)?;
+        install_shell_integration(config.port)?;
     } else {
-        println!("Tip: run `dja init --global` to add this to your shell profile automatically.");
+        println!("Setup complete!");
+        println!();
+        println!("Run `dja init --global` to install shell integration (recommended).");
+        println!("This makes ANTHROPIC_BASE_URL auto-set when you run `dja start`");
+        println!("and auto-unset when you run `dja stop`.");
     }
 
     Ok(())
 }
 
-fn append_to_shell_profile(port: u16) -> Result<()> {
+/// Installs a shell function wrapper into the user's shell profile.
+///
+/// The wrapper intercepts `dja start` and `dja stop` to automatically
+/// set/unset ANTHROPIC_BASE_URL in the current shell — something a
+/// background daemon process cannot do on its own.
+fn install_shell_integration(port: u16) -> Result<()> {
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
 
-    // Determine shell profile
     let shell = std::env::var("SHELL").unwrap_or_default();
     let profile_path = if shell.contains("zsh") {
         home.join(".zshrc")
@@ -104,34 +103,54 @@ fn append_to_shell_profile(port: u16) -> Result<()> {
         home.join(".bashrc")
     };
 
-    let export_line = format!(
-        "\n# dja semantic cache proxy\nexport ANTHROPIC_BASE_URL=http://127.0.0.1:{}\n",
-        port
-    );
+    // Marker so we can detect existing installation and avoid duplicates
+    let marker = "# dja shell integration";
 
-    // Check if already present
-    if let Ok(contents) = std::fs::read_to_string(&profile_path)
-        && contents.contains("ANTHROPIC_BASE_URL")
-    {
-        println!(
-            "ANTHROPIC_BASE_URL already set in {}. Skipping.",
-            profile_path.display()
-        );
-        return Ok(());
+    if let Ok(contents) = std::fs::read_to_string(&profile_path) {
+        if contents.contains(marker) {
+            println!("Shell integration already installed in {}.", profile_path.display());
+            println!("Restart your shell or run: source {}", profile_path.display());
+            return Ok(());
+        }
     }
+
+    let snippet = format!(
+        r#"
+{marker}
+dja() {{
+  command dja "$@"
+  local _exit=$?
+  case "$1" in
+    start)
+      if [ $_exit -eq 0 ]; then
+        export ANTHROPIC_BASE_URL=http://127.0.0.1:{port}
+        echo "dja: ANTHROPIC_BASE_URL set to http://127.0.0.1:{port}"
+      fi
+      ;;
+    stop)
+      unset ANTHROPIC_BASE_URL
+      echo "dja: ANTHROPIC_BASE_URL unset"
+      ;;
+  esac
+  return $_exit
+}}
+"#
+    );
 
     use std::io::Write;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&profile_path)?;
-    file.write_all(export_line.as_bytes())?;
+    file.write_all(snippet.as_bytes())?;
 
-    println!(
-        "Added ANTHROPIC_BASE_URL to {}. Restart your shell or run:",
-        profile_path.display()
-    );
+    println!("Shell integration installed in {}.", profile_path.display());
+    println!();
+    println!("Reload your shell to activate:");
     println!("  source {}", profile_path.display());
+    println!();
+    println!("After that, `dja start` will automatically set ANTHROPIC_BASE_URL");
+    println!("and `dja stop` will automatically unset it.");
 
     Ok(())
 }
