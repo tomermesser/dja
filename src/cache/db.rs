@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS cache (
     created_at INTEGER NOT NULL,
     hit_count INTEGER DEFAULT 0,
     last_hit INTEGER DEFAULT 0,
-    source TEXT NOT NULL DEFAULT 'local'
+    source TEXT NOT NULL DEFAULT 'local',
+    content_hash TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS cache_vec_idx ON cache (
