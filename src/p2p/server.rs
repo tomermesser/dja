@@ -67,13 +67,13 @@ async fn fetch_handler(
         }
     };
 
-    match state.db.is_friend(&peer_id).await {
+    match state.db.is_active_friend(&peer_id).await {
         Ok(true) => {}
         Ok(false) => {
             return (StatusCode::FORBIDDEN, "Peer not in friends list").into_response();
         }
         Err(e) => {
-            tracing::error!("DB error during is_friend check: {e}");
+            tracing::error!("DB error during is_active_friend check: {e}");
             return (StatusCode::INTERNAL_SERVER_ERROR, "DB error").into_response();
         }
     }
@@ -254,6 +254,49 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 403);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_forbidden_for_pending_received_friend() {
+        let db = Arc::new(CacheDb::open_in_memory().await.unwrap());
+
+        // Add friend with pending_received status — must NOT be allowed to fetch
+        db.add_friend("pending-peer", "PendingNode", "pending:9843", FriendStatus::PendingReceived)
+            .await
+            .unwrap();
+
+        let config = test_config("server-peer", "Server");
+        let base = start_test_server(db, config).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{base}/p2p/fetch?content_hash=abc123"))
+            .header("X-Peer-Id", "pending-peer")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 403, "pending_received peer must be forbidden");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_forbidden_for_pending_sent_friend() {
+        let db = Arc::new(CacheDb::open_in_memory().await.unwrap());
+
+        db.add_friend("sent-peer", "SentNode", "sent:9843", FriendStatus::PendingSent)
+            .await
+            .unwrap();
+
+        let config = test_config("server-peer", "Server");
+        let base = start_test_server(db, config).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{base}/p2p/fetch?content_hash=abc123"))
+            .header("X-Peer-Id", "sent-peer")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 403, "pending_sent peer must be forbidden");
     }
 
     #[tokio::test]

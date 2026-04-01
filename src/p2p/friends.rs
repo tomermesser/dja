@@ -141,24 +141,7 @@ impl CacheDb {
     /// Update the status of a friend. Returns true if the peer_id was found and
     /// updated, false if it did not exist.
     pub async fn update_friend_status(&self, peer_id: &str, status: FriendStatus) -> Result<bool> {
-        // Check existence first (before acquiring the lock for the update, to
-        // avoid holding the lock across two awaits).
-        let exists = {
-            let conn = self.conn.lock().await;
-            let mut rows = conn
-                .query(
-                    "SELECT 1 FROM friends WHERE peer_id = ?1 LIMIT 1",
-                    libsql::params![peer_id],
-                )
-                .await
-                .context("Failed to check friend existence")?;
-            rows.next().await?.is_some()
-        };
-
-        if !exists {
-            return Ok(false);
-        }
-
+        // Single lock acquisition: UPDATE then check changes() to avoid TOCTOU race.
         let conn = self.conn.lock().await;
         conn.execute(
             "UPDATE friends SET status = ?1 WHERE peer_id = ?2",
@@ -166,7 +149,16 @@ impl CacheDb {
         )
         .await
         .context("Failed to update friend status")?;
-        Ok(true)
+        let mut rows = conn
+            .query("SELECT changes()", ())
+            .await
+            .context("Failed to query changes()")?;
+        let changed: i64 = if let Some(row) = rows.next().await? {
+            row.get(0).unwrap_or(0)
+        } else {
+            0
+        };
+        Ok(changed > 0)
     }
 
     /// Check whether a peer_id exists in the friends table.
@@ -179,6 +171,20 @@ impl CacheDb {
             )
             .await
             .context("Failed to check friend")?;
+        Ok(rows.next().await?.is_some())
+    }
+
+    /// Check whether a peer_id exists in the friends table with `status = 'active'`.
+    /// A peer with `pending_received` or `pending_sent` status will return `false`.
+    pub async fn is_active_friend(&self, peer_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        let mut rows = conn
+            .query(
+                "SELECT 1 FROM friends WHERE peer_id = ?1 AND status = 'active' LIMIT 1",
+                libsql::params![peer_id],
+            )
+            .await
+            .context("Failed to check active friend")?;
         Ok(rows.next().await?.is_some())
     }
 }
@@ -318,5 +324,72 @@ mod tests {
         assert_eq!("pending_sent".parse::<FriendStatus>().unwrap(), FriendStatus::PendingSent);
         assert_eq!("pending_received".parse::<FriendStatus>().unwrap(), FriendStatus::PendingReceived);
         assert!("unknown".parse::<FriendStatus>().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_is_active_friend_only_active() {
+        let db = CacheDb::open_in_memory().await.expect("open failed");
+
+        // Active friend → should return true
+        db.add_friend("peer-active", "Active", "a:9843", FriendStatus::Active)
+            .await
+            .unwrap();
+        assert!(db.is_active_friend("peer-active").await.unwrap());
+        assert!(db.is_friend("peer-active").await.unwrap());
+
+        // PendingReceived → should return false for is_active_friend
+        db.add_friend("peer-recv", "Recv", "r:9843", FriendStatus::PendingReceived)
+            .await
+            .unwrap();
+        assert!(!db.is_active_friend("peer-recv").await.unwrap());
+        assert!(db.is_friend("peer-recv").await.unwrap()); // still in table
+
+        // PendingSent → should return false for is_active_friend
+        db.add_friend("peer-sent", "Sent", "s:9843", FriendStatus::PendingSent)
+            .await
+            .unwrap();
+        assert!(!db.is_active_friend("peer-sent").await.unwrap());
+        assert!(db.is_friend("peer-sent").await.unwrap());
+
+        // Unknown peer → false
+        assert!(!db.is_active_friend("nonexistent").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_is_active_friend_after_status_upgrade() {
+        let db = CacheDb::open_in_memory().await.expect("open failed");
+
+        db.add_friend("peer-upgrade", "Upgrade", "u:9843", FriendStatus::PendingReceived)
+            .await
+            .unwrap();
+        assert!(!db.is_active_friend("peer-upgrade").await.unwrap());
+
+        db.update_friend_status("peer-upgrade", FriendStatus::Active)
+            .await
+            .unwrap();
+        assert!(db.is_active_friend("peer-upgrade").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_update_friend_status_no_toctou() {
+        // Single lock: UPDATE + changes() in the same conn lock — verifies
+        // the fixed implementation doesn't introduce a regression.
+        let db = CacheDb::open_in_memory().await.expect("open failed");
+
+        db.add_friend("peer-x", "X", "x:9843", FriendStatus::PendingSent)
+            .await
+            .unwrap();
+
+        let updated = db
+            .update_friend_status("peer-x", FriendStatus::Active)
+            .await
+            .unwrap();
+        assert!(updated, "should return true when peer exists");
+
+        let not_updated = db
+            .update_friend_status("does-not-exist", FriendStatus::Active)
+            .await
+            .unwrap();
+        assert!(!not_updated, "should return false when peer does not exist");
     }
 }

@@ -298,3 +298,49 @@ async fn test_store_computes_content_hash() {
     assert_eq!(stored_hash, expected, "content_hash mismatch");
     assert_eq!(stored_hash.len(), 64, "SHA256 hex should be 64 chars");
 }
+
+#[tokio::test]
+async fn test_lookup_by_content_hash_end_to_end_integrity() {
+    // Stores a response with known content, retrieves it via lookup_by_content_hash,
+    // then verifies that SHA-256 of the returned bytes matches the stored hash.
+    let db = CacheDb::open_in_memory().await.expect("open failed");
+    let emb = make_embedding(1.0);
+    let data = b"known response payload for integrity check";
+
+    db.store("integrity prompt", "sys", "gpt-4", &emb, data, "local")
+        .await
+        .expect("store failed");
+
+    // Compute expected hash
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    let expected_hash = hex::encode(hasher.finalize());
+
+    // Retrieve via lookup_by_content_hash
+    let retrieved = db
+        .lookup_by_content_hash(&expected_hash)
+        .await
+        .expect("lookup_by_content_hash failed");
+    let retrieved = retrieved.expect("expected Some bytes from lookup_by_content_hash");
+
+    // Verify SHA-256 of retrieved bytes matches the stored hash
+    let mut verify_hasher = Sha256::new();
+    verify_hasher.update(&retrieved);
+    let actual_hash = hex::encode(verify_hasher.finalize());
+
+    assert_eq!(
+        actual_hash, expected_hash,
+        "SHA-256 of retrieved bytes must equal the stored content_hash"
+    );
+    assert_eq!(retrieved, data, "retrieved bytes must equal original data");
+}
+
+#[tokio::test]
+async fn test_lookup_by_content_hash_not_found() {
+    let db = CacheDb::open_in_memory().await.expect("open failed");
+    let result = db
+        .lookup_by_content_hash("0000000000000000000000000000000000000000000000000000000000000000")
+        .await
+        .expect("lookup_by_content_hash failed");
+    assert!(result.is_none());
+}

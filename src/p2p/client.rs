@@ -255,4 +255,114 @@ mod tests {
         let friend = db.get_friend("caller-peer").await.unwrap().unwrap();
         assert_eq!(friend.status, crate::p2p::FriendStatus::Active);
     }
+
+    /// Verifies that fetch_response succeeds when the peer returns bytes whose
+    /// SHA-256 matches the requested content_hash.
+    #[tokio::test]
+    async fn test_fetch_response_correct_hash_passes() {
+        let (db, addr) = start_test_peer("server-peer", "Server").await;
+
+        let response_bytes = b"hello world from peer cache";
+        let hash = hex::encode(Sha256::digest(response_bytes));
+
+        // Insert the entry into the DB with the correct hash
+        {
+            let conn = db.conn.lock().await;
+            conn.execute(
+                "INSERT INTO cache (prompt_text, system_hash, model, response_data, response_size, created_at, content_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                libsql::params![
+                    "test",
+                    "sys",
+                    "gpt-4",
+                    response_bytes.to_vec(),
+                    response_bytes.len() as i64,
+                    0i64,
+                    hash.clone()
+                ],
+            )
+            .await
+            .unwrap();
+        }
+
+        // Add requester as an active friend so fetch_handler allows the request
+        db.add_friend("requester", "Req", "req:9843", crate::p2p::FriendStatus::Active)
+            .await
+            .unwrap();
+
+        let client = PeerClient::new();
+        let result = client
+            .fetch_response(&addr, &hash, "requester")
+            .await
+            .expect("fetch_response should succeed with matching hash");
+
+        assert_eq!(result, response_bytes);
+    }
+
+    /// Verifies that fetch_response returns an error when the server returns
+    /// bytes whose SHA-256 does NOT match the requested content_hash.
+    #[tokio::test]
+    async fn test_fetch_response_mismatched_hash_rejected() {
+        let (db, addr) = start_test_peer("server-peer", "Server").await;
+
+        let response_bytes = b"tampered response data";
+        // Deliberately wrong hash (SHA-256 of something else)
+        let wrong_hash = hex::encode(Sha256::digest(b"original data"));
+
+        // Insert entry with the WRONG hash so the server returns mismatched data
+        {
+            let conn = db.conn.lock().await;
+            conn.execute(
+                "INSERT INTO cache (prompt_text, system_hash, model, response_data, response_size, created_at, content_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                libsql::params![
+                    "test",
+                    "sys",
+                    "gpt-4",
+                    response_bytes.to_vec(),
+                    response_bytes.len() as i64,
+                    0i64,
+                    wrong_hash.clone()
+                ],
+            )
+            .await
+            .unwrap();
+        }
+
+        db.add_friend("requester", "Req", "req:9843", crate::p2p::FriendStatus::Active)
+            .await
+            .unwrap();
+
+        let client = PeerClient::new();
+        // The server returns `response_bytes`, but the client expects SHA-256(response_bytes) == wrong_hash
+        // which is false → should error
+        let result = client
+            .fetch_response(&addr, &wrong_hash, "requester")
+            .await;
+
+        assert!(
+            result.is_err(),
+            "fetch_response must reject a response whose hash doesn't match"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("hash mismatch"), "error should mention hash mismatch, got: {err}");
+    }
+
+    /// Verifies fetch_response returns error when the peer returns a non-200 status.
+    #[tokio::test]
+    async fn test_fetch_response_not_found_returns_error() {
+        let (db, addr) = start_test_peer("server-peer", "Server").await;
+
+        db.add_friend("requester", "Req", "req:9843", crate::p2p::FriendStatus::Active)
+            .await
+            .unwrap();
+
+        let client = PeerClient::new();
+        let nonexistent_hash = "a".repeat(64);
+        let result = client
+            .fetch_response(&addr, &nonexistent_hash, "requester")
+            .await;
+
+        assert!(result.is_err(), "should error on 404");
+    }
 }

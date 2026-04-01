@@ -37,10 +37,9 @@ pub fn decode_invite(code: &str) -> Result<InvitePayload> {
 /// Returns `true` when `s` looks like a base64 invite code rather than a
 /// raw peer_id (peer IDs are bare UUID-ish strings without `=` or `/`).
 fn looks_like_invite_code(s: &str) -> bool {
-    // A raw peer_id won't contain `+`, `/` or `=` (base64 alphabet extras).
-    // A minimal JSON invite code, once encoded, will be at least 60 chars.
-    s.len() > 40 && s.chars().any(|c| matches!(c, '+' | '/' | '='))
-        || (s.len() > 40 && B64.decode(s).is_ok())
+    // Unambiguous check: try to decode and parse as a valid InvitePayload.
+    // If it succeeds, it's an invite code; raw peer_ids are not valid invite codes.
+    s.len() > 40 && decode_invite(s).is_ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -114,18 +113,20 @@ pub async fn run_add(code_or_peer_id: &str, addr: Option<&str>) -> Result<()> {
         )
     };
 
-    db.add_friend(&peer_id, &display_name, &public_addr, FriendStatus::Active)
+    // Add as PendingSent initially — we'll upgrade to Active only after the
+    // remote peer acknowledges the invite.
+    db.add_friend(&peer_id, &display_name, &public_addr, FriendStatus::PendingSent)
         .await
         .context("Saving friend to database")?;
 
-    println!("Friend added!");
     println!("  peer_id:   {}", peer_id);
     if !display_name.is_empty() {
         println!("  name:      {}", display_name);
     }
     println!("  addr:      {}", public_addr);
 
-    // Phase 3: call peer's POST /p2p/invite to perform mutual registration.
+    // Call peer's POST /p2p/invite to perform mutual registration.
+    // If successful, upgrade local status to Active; otherwise leave as PendingSent.
     let config = Config::load().unwrap_or_default();
     let self_peer_id = &config.p2p.peer_id;
     let own_display_name = &config.p2p.display_name;
@@ -133,12 +134,27 @@ pub async fn run_add(code_or_peer_id: &str, addr: Option<&str>) -> Result<()> {
 
     if !self_peer_id.is_empty() && !own_public_addr.is_empty() {
         let peer_client = PeerClient::new();
-        if let Err(e) = peer_client
+        match peer_client
             .send_invite(&public_addr, self_peer_id, own_display_name, own_public_addr)
             .await
         {
-            eprintln!("Warning: could not notify peer of invite (local add succeeded): {e}");
+            Ok(()) => {
+                db.update_friend_status(&peer_id, FriendStatus::Active)
+                    .await
+                    .context("Upgrading friend status to active")?;
+                println!("Friend added!");
+            }
+            Err(e) => {
+                eprintln!(
+                    "Warning: could not reach peer to send invite (saved as pending_sent): {e}"
+                );
+                println!("Friend saved as pending (invite not yet delivered).");
+                println!("Re-run `dja p2p add` when the peer is reachable to complete the handshake.");
+            }
         }
+    } else {
+        // No self identity configured — just leave as pending_sent.
+        println!("Friend saved as pending (P2P identity not fully configured).");
     }
 
     Ok(())
