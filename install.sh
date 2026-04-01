@@ -34,11 +34,16 @@ detect_arch() {
 
 get_target() {
     case "$OS" in
-        darwin) TARGET="${ARCH}-apple-darwin";;
+        darwin)
+            case "$ARCH" in
+                aarch64) TARGET="aarch64-apple-darwin";;
+                *) error "Only Apple Silicon (arm64) Macs are supported. Intel Macs are not supported.";;
+            esac
+            ;;
         linux)
             case "$ARCH" in
                 x86_64)  TARGET="x86_64-unknown-linux-gnu";;
-                aarch64) TARGET="aarch64-unknown-linux-gnu";;
+                *) error "Only x86_64 Linux is supported. For ARM Linux, build from source: cargo install --path .";;
             esac
             ;;
     esac
