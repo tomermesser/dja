@@ -35,6 +35,14 @@ CREATE INDEX IF NOT EXISTS cache_vec_idx ON cache (
 CREATE INDEX IF NOT EXISTS cache_created_idx ON cache (created_at);
 
 CREATE INDEX IF NOT EXISTS cache_last_hit_idx ON cache (last_hit);
+
+CREATE TABLE IF NOT EXISTS friends (
+    peer_id TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL DEFAULT '',
+    public_addr TEXT NOT NULL,
+    added_at INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active'
+);
 "#;
 
 async fn apply_schema(conn: &Connection) -> Result<()> {
@@ -50,6 +58,13 @@ async fn apply_schema(conn: &Connection) -> Result<()> {
     let _ = conn
         .execute(
             "ALTER TABLE cache ADD COLUMN source TEXT NOT NULL DEFAULT 'local'",
+            (),
+        )
+        .await;
+    // Migration: add 'content_hash' column to existing databases (ignore error if already present)
+    let _ = conn
+        .execute(
+            "ALTER TABLE cache ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''",
             (),
         )
         .await;

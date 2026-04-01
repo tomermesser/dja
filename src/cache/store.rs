@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 
 use super::db::CacheDb;
 
@@ -27,6 +28,13 @@ impl CacheDb {
             .context("System time before UNIX epoch")?
             .as_secs() as i64;
 
+        // Compute SHA256 content hash of the raw response bytes
+        let content_hash = {
+            let mut hasher = Sha256::new();
+            hasher.update(response_data);
+            hex::encode(hasher.finalize())
+        };
+
         // Format embedding as JSON array for vector32()
         let embedding_json = format!(
             "[{}]",
@@ -40,8 +48,8 @@ impl CacheDb {
         let conn = self.conn.lock().await;
         let mut rows = conn
             .query(
-                "INSERT INTO cache (prompt_text, system_hash, model, embedding, response_data, response_size, created_at, source)
-                 VALUES (?1, ?2, ?3, vector32(?4), ?5, ?6, ?7, ?8)
+                "INSERT INTO cache (prompt_text, system_hash, model, embedding, response_data, response_size, created_at, source, content_hash)
+                 VALUES (?1, ?2, ?3, vector32(?4), ?5, ?6, ?7, ?8, ?9)
                  RETURNING id",
                 libsql::params![
                     prompt,
@@ -52,6 +60,7 @@ impl CacheDb {
                     response_size,
                     created_at,
                     source,
+                    content_hash,
                 ],
             )
             .await

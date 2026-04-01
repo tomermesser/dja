@@ -3,6 +3,40 @@ use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
 
+/// Configuration for the P2P cache-sharing feature.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(default)]
+pub struct P2pConfig {
+    /// Enable P2P cache sharing. Default: false.
+    pub enabled: bool,
+    /// Turso URL for the central P2P index database.
+    pub index_url: String,
+    /// Turso auth token for the central P2P index database.
+    pub index_token: String,
+    /// Auto-generated UUID identifying this peer.
+    pub peer_id: String,
+    /// Port this peer's HTTP API listens on. Default: 9843.
+    pub listen_port: u16,
+    /// Human-readable name for this peer.
+    pub display_name: String,
+    /// Publicly reachable address for this peer (e.g. "myhost.tailnet:9843").
+    pub public_addr: String,
+}
+
+impl Default for P2pConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            index_url: String::new(),
+            index_token: String::new(),
+            peer_id: String::new(),
+            listen_port: 9843,
+            display_name: String::new(),
+            public_addr: String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct Config {
@@ -33,6 +67,8 @@ pub struct Config {
     /// Whether to coalesce identical in-flight requests (singleflight).
     /// Default true.
     pub request_coalescing: bool,
+    /// P2P cache-sharing configuration.
+    pub p2p: P2pConfig,
 }
 
 impl Default for Config {
@@ -49,6 +85,7 @@ impl Default for Config {
             multi_turn_caching: true,
             auto_cache_control: true,
             request_coalescing: true,
+            p2p: P2pConfig::default(),
         }
     }
 }
@@ -213,5 +250,36 @@ mod tests {
         "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(!config.auto_cache_control);
+    }
+
+    #[test]
+    fn test_default_p2p_config() {
+        let config = Config::default();
+        assert!(!config.p2p.enabled);
+        assert_eq!(config.p2p.listen_port, 9843);
+        assert!(config.p2p.index_url.is_empty());
+        assert!(config.p2p.peer_id.is_empty());
+    }
+
+    #[test]
+    fn test_parse_p2p_config() {
+        let toml_str = r#"
+            [p2p]
+            enabled = true
+            index_url = "libsql://mydb.turso.io"
+            index_token = "secret"
+            peer_id = "550e8400-e29b-41d4-a716-446655440000"
+            listen_port = 9844
+            display_name = "my-node"
+            public_addr = "myhost.tailnet:9844"
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.p2p.enabled);
+        assert_eq!(config.p2p.index_url, "libsql://mydb.turso.io");
+        assert_eq!(config.p2p.index_token, "secret");
+        assert_eq!(config.p2p.peer_id, "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(config.p2p.listen_port, 9844);
+        assert_eq!(config.p2p.display_name, "my-node");
+        assert_eq!(config.p2p.public_addr, "myhost.tailnet:9844");
     }
 }

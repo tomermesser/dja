@@ -1,3 +1,5 @@
+use sha2::{Digest, Sha256};
+
 use super::*;
 use db::EMBEDDING_DIM;
 
@@ -265,4 +267,34 @@ async fn test_lookup_respects_system_hash_when_enabled() {
         .await
         .expect("lookup failed");
     assert!(hit.is_some(), "should hit with matching system_hash");
+}
+
+#[tokio::test]
+async fn test_store_computes_content_hash() {
+    let db = CacheDb::open_in_memory().await.expect("open failed");
+    let emb = make_embedding(1.0);
+    let data = b"hello content hash";
+
+    let id = db
+        .store("prompt", "sys", "gpt-4", &emb, data, "local")
+        .await
+        .expect("store failed");
+    assert!(id > 0);
+
+    // Compute expected SHA256
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    let expected = hex::encode(hasher.finalize());
+
+    // Query the stored content_hash directly
+    let conn = db.conn.lock().await;
+    let mut rows = conn
+        .query("SELECT content_hash FROM cache WHERE id = ?1", libsql::params![id])
+        .await
+        .expect("query failed");
+    let row = rows.next().await.expect("query error").expect("no row");
+    let stored_hash: String = row.get(0).expect("get failed");
+
+    assert_eq!(stored_hash, expected, "content_hash mismatch");
+    assert_eq!(stored_hash.len(), 64, "SHA256 hex should be 64 chars");
 }

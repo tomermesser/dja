@@ -188,6 +188,7 @@ async fn test_proxy_non_streaming_cache_hit() {
         multi_turn_caching: true,
         auto_cache_control: true,
         request_coalescing: true,
+        p2p: Default::default(),
     };
 
     // Set up proxy
@@ -298,6 +299,7 @@ async fn test_proxy_streaming_cache_hit() {
         multi_turn_caching: true,
         auto_cache_control: true,
         request_coalescing: true,
+        p2p: Default::default(),
     };
 
     let (event_tx, _rx) = dja::proxy::metrics::event_channel();
@@ -408,6 +410,7 @@ async fn test_cache_control_injected_on_miss() {
         multi_turn_caching: true,
         auto_cache_control: true,
         request_coalescing: true,
+        p2p: Default::default(),
     };
 
     let (event_tx, _rx) = dja::proxy::metrics::event_channel();
@@ -512,6 +515,7 @@ async fn test_cache_control_not_injected_when_disabled() {
         multi_turn_caching: true,
         auto_cache_control: false,
         request_coalescing: true,
+        p2p: Default::default(),
     };
 
     let (event_tx, _rx) = dja::proxy::metrics::event_channel();
