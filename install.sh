@@ -52,7 +52,9 @@ get_target() {
 get_latest_version() {
     VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
         | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    [ -z "$VERSION" ] && error "Could not fetch latest release version"
+    if [ -z "$VERSION" ]; then
+        error "Could not fetch latest release version"
+    fi
 }
 
 install_binary() {
