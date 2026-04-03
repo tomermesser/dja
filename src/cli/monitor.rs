@@ -30,6 +30,7 @@ struct StatsData {
     skips: u64,
     errors: u64,
     #[serde(default)]
+    #[allow(dead_code)]
     coalesced: u64,
     time_saved_ms: u64,
     estimated_tokens_saved: u64,
