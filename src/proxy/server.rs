@@ -140,6 +140,7 @@ pub async fn run(config: Config, shutdown: impl Future<Output = ()> + Send + 'st
         .route("/internal/events", get(internal::events_handler))
         .route("/internal/p2p/friends", get(internal::p2p_friends_handler))
         .fallback(handler::proxy_handler)
+        .layer(tower::limit::ConcurrencyLimitLayer::new(20))
         .with_state(state);
 
     let listener = TcpListener::bind(&addr).await?;

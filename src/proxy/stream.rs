@@ -16,11 +16,12 @@ pub struct SseEvent {
 ///
 /// SSE format: lines starting with `event:`, `data:`, separated by blank lines.
 /// An event may have multiple `data:` lines (concatenated with newlines).
-pub fn parse_sse_events(raw: &[u8]) -> Vec<SseEvent> {
+pub fn parse_sse_events(raw: &[u8]) -> (Vec<SseEvent>, usize) {
     let text = String::from_utf8_lossy(raw);
     let mut events = Vec::new();
     let mut current_event_type: Option<String> = None;
     let mut current_data_lines: Vec<String> = Vec::new();
+    let mut error_count: usize = 0;
 
     for line in text.lines() {
         if line.is_empty() {
@@ -38,8 +39,11 @@ pub fn parse_sse_events(raw: &[u8]) -> Vec<SseEvent> {
             current_event_type = Some(value.trim().to_string());
         } else if let Some(value) = line.strip_prefix("data:") {
             current_data_lines.push(value.trim_start_matches(' ').to_string());
+        } else if line.starts_with(':') {
+            // SSE comment, ignore
+        } else {
+            error_count += 1;
         }
-        // Ignore other lines (comments starting with ':', etc.)
     }
 
     // Handle trailing event without final blank line
@@ -50,7 +54,7 @@ pub fn parse_sse_events(raw: &[u8]) -> Vec<SseEvent> {
         });
     }
 
-    events
+    (events, error_count)
 }
 
 /// Serialize an SSE event back to wire format.
@@ -74,7 +78,10 @@ fn serialize_sse_event(event: &SseEvent) -> String {
 ///
 /// Returns the modified raw SSE bytes.
 pub fn inject_cached_marker_sse(raw: &[u8]) -> Vec<u8> {
-    let mut events = parse_sse_events(raw);
+    let (mut events, error_count) = parse_sse_events(raw);
+    if error_count > 0 {
+        tracing::warn!(error_count, "SSE parse: unparsed lines in cached marker injection");
+    }
     let mut injected = false;
 
     for event in &mut events {
@@ -178,7 +185,10 @@ pub fn replay_cached_response(cached_data: Vec<u8>, inject_marker: bool) -> Body
         cached_data
     };
 
-    let events = parse_sse_events(&data);
+    let (events, error_count) = parse_sse_events(&data);
+    if error_count > 0 {
+        tracing::warn!(error_count, "SSE parse: unparsed lines in cached response replay");
+    }
     let stream = ReplayStream {
         events,
         index: 0,
@@ -189,10 +199,15 @@ pub fn replay_cached_response(cached_data: Vec<u8>, inject_marker: bool) -> Body
 }
 
 /// Stream that tees upstream bytes to both client and a buffer.
+///
+/// If the buffer exceeds `max_size`, the sender is dropped (signalling to the
+/// cache-storage side that the response should not be cached) and further
+/// chunks are forwarded to the client without accumulation.
 struct TeeStream {
     inner: Pin<Box<dyn futures::Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
     buffer: Vec<u8>,
     tx: Option<oneshot::Sender<Vec<u8>>>,
+    max_size: usize,
 }
 
 impl futures::Stream for TeeStream {
@@ -202,7 +217,20 @@ impl futures::Stream for TeeStream {
         match self.inner.as_mut().poll_next(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(Ok(chunk))) => {
-                self.buffer.extend_from_slice(&chunk);
+                if self.tx.is_some() {
+                    if self.buffer.len() + chunk.len() > self.max_size {
+                        // Buffer would exceed limit — drop sender to signal
+                        // that this response should not be cached.
+                        let _ = self.tx.take();
+                        self.buffer.clear();
+                        tracing::warn!(
+                            max_size = self.max_size,
+                            "TeeStream buffer exceeded max_size, dropping cache buffer"
+                        );
+                    } else {
+                        self.buffer.extend_from_slice(&chunk);
+                    }
+                }
                 Poll::Ready(Some(Ok(chunk)))
             }
             Poll::Ready(Some(Err(e))) => {
@@ -237,9 +265,14 @@ impl Drop for TeeStream {
 
 /// Create a tee stream that forwards upstream SSE to the client while buffering for cache.
 ///
+/// `max_size` caps the buffer — if the response exceeds this limit, the sender is
+/// dropped (so the cache-storage receiver gets a `RecvError`) and the stream
+/// continues forwarding to the client without accumulating further data.
+///
 /// Returns (body for client, receiver for buffered bytes).
 pub fn tee_stream(
     upstream: reqwest::Response,
+    max_size: usize,
 ) -> (Body, oneshot::Receiver<Vec<u8>>) {
     let (tx, rx) = oneshot::channel::<Vec<u8>>();
 
@@ -249,6 +282,7 @@ pub fn tee_stream(
         inner: Box::pin(byte_stream),
         buffer: Vec::new(),
         tx: Some(tx),
+        max_size,
     };
 
     let body = Body::from_stream(stream);
@@ -262,7 +296,8 @@ mod tests {
     #[test]
     fn test_parse_simple_events() {
         let raw = b"event: message_start\ndata: {\"type\":\"message_start\"}\n\nevent: ping\ndata: {}\n\n";
-        let events = parse_sse_events(raw);
+        let (events, error_count) = parse_sse_events(raw);
+        assert_eq!(error_count, 0);
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].event_type.as_deref(), Some("message_start"));
         assert_eq!(events[0].data, "{\"type\":\"message_start\"}");
@@ -273,7 +308,8 @@ mod tests {
     #[test]
     fn test_parse_event_without_type() {
         let raw = b"data: {\"hello\":\"world\"}\n\n";
-        let events = parse_sse_events(raw);
+        let (events, error_count) = parse_sse_events(raw);
+        assert_eq!(error_count, 0);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, None);
         assert_eq!(events[0].data, "{\"hello\":\"world\"}");
@@ -282,7 +318,7 @@ mod tests {
     #[test]
     fn test_parse_multiline_data() {
         let raw = b"event: test\ndata: line1\ndata: line2\n\n";
-        let events = parse_sse_events(raw);
+        let (events, _) = parse_sse_events(raw);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].data, "line1\nline2");
     }
@@ -290,7 +326,7 @@ mod tests {
     #[test]
     fn test_parse_trailing_event_no_blank_line() {
         let raw = b"event: test\ndata: hello";
-        let events = parse_sse_events(raw);
+        let (events, _) = parse_sse_events(raw);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type.as_deref(), Some("test"));
         assert_eq!(events[0].data, "hello");
@@ -298,17 +334,34 @@ mod tests {
 
     #[test]
     fn test_parse_empty_input() {
-        let events = parse_sse_events(b"");
+        let (events, error_count) = parse_sse_events(b"");
+        assert_eq!(error_count, 0);
         assert!(events.is_empty());
     }
 
     #[test]
     fn test_parse_multiple_blank_lines() {
         let raw = b"event: a\ndata: 1\n\n\nevent: b\ndata: 2\n\n";
-        let events = parse_sse_events(raw);
+        let (events, _) = parse_sse_events(raw);
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].event_type.as_deref(), Some("a"));
         assert_eq!(events[1].event_type.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn test_parse_sse_error_count() {
+        let raw = b"event: test\ndata: hello\nbogus line\nanother bad\n\n";
+        let (events, error_count) = parse_sse_events(raw);
+        assert_eq!(events.len(), 1);
+        assert_eq!(error_count, 2);
+    }
+
+    #[test]
+    fn test_parse_sse_comments_not_counted_as_errors() {
+        let raw = b": this is a comment\nevent: test\ndata: hello\n\n";
+        let (events, error_count) = parse_sse_events(raw);
+        assert_eq!(events.len(), 1);
+        assert_eq!(error_count, 0);
     }
 
     #[test]
@@ -329,7 +382,7 @@ mod tests {
         let result_str = String::from_utf8(result).unwrap();
 
         // Verify by parsing
-        let events = parse_sse_events(result_str.as_bytes());
+        let (events, _) = parse_sse_events(result_str.as_bytes());
         assert_eq!(events.len(), 3);
 
         let delta1: serde_json::Value = serde_json::from_str(&events[1].data).unwrap();
@@ -371,7 +424,7 @@ mod tests {
         );
 
         let result = inject_cached_marker_sse(raw.as_bytes());
-        let events = parse_sse_events(&result);
+        let (events, _) = parse_sse_events(&result);
 
         let d0: serde_json::Value = serde_json::from_str(&events[0].data).unwrap();
         assert_eq!(d0["delta"]["text"].as_str().unwrap(), "[cached] A");
@@ -449,12 +502,12 @@ mod tests {
             "data: {}\n",
             "\n",
         );
-        let events = parse_sse_events(original_raw.as_bytes());
+        let (events, _) = parse_sse_events(original_raw.as_bytes());
         let mut serialized = String::new();
         for event in &events {
             serialized.push_str(&serialize_sse_event(event));
         }
-        let re_parsed = parse_sse_events(serialized.as_bytes());
+        let (re_parsed, _) = parse_sse_events(serialized.as_bytes());
         assert_eq!(events, re_parsed);
     }
 }

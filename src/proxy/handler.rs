@@ -452,7 +452,7 @@ async fn handle_messages_request(
                     forward::forward_raw(&state, req, forward_body).await?;
 
                 let status = upstream_resp.status();
-                let (body, buffer_rx) = stream::tee_stream(upstream_resp);
+                let (body, buffer_rx) = stream::tee_stream(upstream_resp, state.config.max_response_size);
                 let response = response_builder.body(body)?;
 
                 // Spawn background task to cache the response once streaming completes

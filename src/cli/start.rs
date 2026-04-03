@@ -36,14 +36,37 @@ fn init_logging(config: &Config) -> Result<WorkerGuard> {
     Ok(guard)
 }
 
-/// Write the current process PID to the PID file.
-fn write_pid_file() -> Result<()> {
+/// Write the current process PID to the PID file with an exclusive lock.
+/// Returns the locked file handle — the caller must keep it alive so the lock
+/// is held for the daemon's lifetime.
+fn write_pid_file() -> Result<fs::File> {
+    use fs2::FileExt;
+    use std::io::Write;
+
     Config::ensure_data_dir()?;
     let pid = std::process::id();
     let pid_path = Config::pid_path();
-    fs::write(&pid_path, pid.to_string())
+
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&pid_path)
+        .with_context(|| format!("opening PID file {}", pid_path.display()))?;
+
+    file.try_lock_exclusive()
+        .map_err(|_| anyhow::anyhow!("Another dja instance is already running"))?;
+
+    write!(file, "{}", pid)
         .with_context(|| format!("writing PID file {}", pid_path.display()))?;
-    Ok(())
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&pid_path, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("setting permissions on {}", pid_path.display()))?;
+    }
+    Ok(file)
 }
 
 /// Remove the PID file on shutdown.
@@ -90,7 +113,19 @@ pub async fn run() -> Result<()> {
     // Keep the guard alive for the duration of the process so logs flush.
     let _log_guard = init_logging(&config)?;
 
-    write_pid_file()?;
+    #[cfg(unix)]
+    {
+        let log_path = Config::log_path();
+        if log_path.exists() {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&log_path, fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("setting permissions on {}", log_path.display()))?;
+        }
+    }
+
+    // Keep the locked file handle alive so the exclusive lock is held for the
+    // daemon's lifetime.  Dropping it would release the lock.
+    let _pid_lock = write_pid_file()?;
 
     tracing::info!("dja starting on 127.0.0.1:{}", config.port);
 

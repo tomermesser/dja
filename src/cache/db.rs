@@ -90,6 +90,13 @@ impl CacheDb {
         let conn = db.connect().context("Failed to connect to database")?;
         apply_schema(&conn).await?;
 
+        #[cfg(unix)]
+        if db_path.exists() {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(db_path, std::fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("setting permissions on {}", db_path.display()))?;
+        }
+
         Ok(Self { db, conn: Mutex::new(conn) })
     }
 

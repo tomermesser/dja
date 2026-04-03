@@ -82,6 +82,9 @@ fn update_config_field(key: &str, value: &str) -> Result<()> {
         _ => bail!("Unknown config key: '{}'. Valid keys: port, upstream, threshold, ttl, max_entries, max_response_size, log_level", key),
     }
 
+    // Validate before writing
+    config.validate()?;
+
     // Write back
     let toml_str = toml::to_string_pretty(&config)?;
     std::fs::write(&config_path, toml_str)?;

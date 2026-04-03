@@ -41,6 +41,11 @@ pub async fn run(global: bool) -> Result<()> {
 
         let toml_str = toml::to_string_pretty(&config)?;
         std::fs::write(&config_path, &toml_str)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600))?;
+        }
         println!("Created config at {}", config_path.display());
         println!("Peer ID:      {}", config.p2p.peer_id);
         println!("Display name: {}", config.p2p.display_name);
@@ -78,6 +83,11 @@ pub async fn run(global: bool) -> Result<()> {
         if changed {
             let toml_str = toml::to_string_pretty(&config)?;
             std::fs::write(&config_path, &toml_str)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600))?;
+            }
             println!("Updated config at {}", config_path.display());
         } else {
             println!("Config already exists at {}", config_path.display());

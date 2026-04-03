@@ -101,10 +101,25 @@ impl Config {
                 fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
             let config: Config =
                 toml::from_str(&contents).with_context(|| format!("parsing {}", path.display()))?;
+            config.validate()?;
             Ok(config)
         } else {
-            Ok(Config::default())
+            let config = Config::default();
+            config.validate()?;
+            Ok(config)
         }
+    }
+
+    /// Validate config values are within acceptable ranges.
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            (0.0..=1.0).contains(&self.threshold),
+            "threshold must be between 0.0 and 1.0, got {}",
+            self.threshold
+        );
+        anyhow::ensure!(self.max_entries > 0, "max_entries must be positive");
+        anyhow::ensure!(self.max_response_size > 0, "max_response_size must be positive");
+        Ok(())
     }
 
     /// Return the path to the config file (~/.config/dja/config.toml).
@@ -257,7 +272,7 @@ mod tests {
         let config = Config::default();
         assert!(!config.p2p.enabled);
         assert_eq!(config.p2p.listen_port, 9843);
-        assert!(config.p2p.index_url.is_empty());
+        assert!(!config.p2p.index_url.is_empty());
         assert!(config.p2p.peer_id.is_empty());
     }
 
