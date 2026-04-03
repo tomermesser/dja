@@ -16,15 +16,26 @@ pub fn inject_cache_control(body: &[u8]) -> Option<Bytes> {
     let mut json: serde_json::Value = serde_json::from_slice(body).ok()?;
     let obj = json.as_object_mut()?;
 
-    let existing_count = {
+    let (existing_count, has_ttl) = {
         let mut count = 0;
+        let mut ttl = false;
         for field in &["system", "tools", "messages"] {
             if let Some(val) = obj.get(*field) {
                 count += count_cache_control_in_value(val);
+                if has_ttl_in_value(val) {
+                    ttl = true;
+                }
             }
         }
-        count
+        (count, ttl)
     };
+
+    // If the client is using TTL-based cache_control, don't inject our own
+    // breakpoints — mixing ephemeral (no TTL) with TTL blocks can violate
+    // Anthropic's non-decreasing TTL ordering constraint.
+    if has_ttl {
+        return None;
+    }
 
     if existing_count >= 4 {
         return None;
@@ -89,6 +100,22 @@ fn count_cache_control_in_value(val: &serde_json::Value) -> usize {
         }
         serde_json::Value::Array(arr) => arr.iter().map(count_cache_control_in_value).sum(),
         _ => 0,
+    }
+}
+
+/// Returns true if any `cache_control` object in the value tree contains a `ttl` field.
+fn has_ttl_in_value(val: &serde_json::Value) -> bool {
+    match val {
+        serde_json::Value::Object(map) => {
+            if let Some(cc) = map.get("cache_control") {
+                if cc.get("ttl").is_some() {
+                    return true;
+                }
+            }
+            map.values().any(has_ttl_in_value)
+        }
+        serde_json::Value::Array(arr) => arr.iter().any(has_ttl_in_value),
+        _ => false,
     }
 }
 
@@ -326,5 +353,33 @@ mod tests {
         let system = json["system"].as_array().unwrap();
         assert_eq!(system[0]["text"].as_str().unwrap(), original_text);
         assert_eq!(system[0]["type"].as_str().unwrap(), "text");
+    }
+
+    #[test]
+    fn test_skips_injection_when_client_uses_ttl() {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "system": [
+                {"type": "text", "text": "system prompt", "cache_control": {"type": "ephemeral", "ttl": "5m"}}
+            ],
+            "tools": [
+                {"name": "tool_a", "description": "tool", "input_schema": {"type": "object"}}
+            ],
+            "messages": [{"role": "user", "content": "Hello"}]
+        })).unwrap();
+        assert!(inject_cache_control(&body).is_none(), "should not inject when client uses TTL-based cache_control");
+    }
+
+    #[test]
+    fn test_skips_injection_when_tools_have_ttl() {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "system": "plain system prompt",
+            "tools": [
+                {"name": "tool_a", "description": "tool", "input_schema": {"type": "object"}, "cache_control": {"type": "ephemeral", "ttl": "1h"}}
+            ],
+            "messages": [{"role": "user", "content": "Hello"}]
+        })).unwrap();
+        assert!(inject_cache_control(&body).is_none(), "should not inject when tools have TTL cache_control");
     }
 }
