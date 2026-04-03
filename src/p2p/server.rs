@@ -163,12 +163,10 @@ pub fn build_peer_router(state: PeerServerState) -> Router {
 
 /// Start the peer HTTP server and run until the process exits.
 ///
-/// Binds to `127.0.0.1` by default. External reachability is expected to be
-/// provided by a tunnel (Tailscale, Cloudflare Tunnel, etc.) as documented in
-/// the P2P design spec — peers are not required to be directly internet-routable.
+/// Binds to `0.0.0.0` so peers on the local network can connect directly.
 pub async fn start_peer_server(state: PeerServerState) -> Result<()> {
     let port = state.config.listen_port;
-    let addr = format!("127.0.0.1:{port}");
+    let addr = format!("0.0.0.0:{port}");
 
     let app = build_peer_router(state);
 
