@@ -61,6 +61,12 @@ enum Commands {
     },
     /// Open live TUI dashboard
     Monitor,
+    /// Uninstall dja completely (binary, data, config, shell hooks)
+    Uninstall {
+        /// Skip confirmation prompt
+        #[arg(long)]
+        force: bool,
+    },
     /// P2P cache-sharing: manage friends and invite codes
     P2p {
         #[command(subcommand)]
@@ -109,6 +115,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Export => dja::cli::export::run().await?,
         Commands::Import { file } => dja::cli::import::run(file).await?,
         Commands::Monitor => dja::cli::monitor::run().await?,
+        Commands::Uninstall { force } => dja::cli::uninstall::run(force)?,
         Commands::P2p { sub } => match sub {
             P2pCommands::Invite => dja::cli::p2p::run_invite().await?,
             P2pCommands::Add { code_or_peer_id, addr } => {

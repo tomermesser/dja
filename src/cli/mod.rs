@@ -9,6 +9,7 @@ pub mod p2p;
 pub mod start;
 pub mod stats;
 pub mod test_cmd;
+pub mod uninstall;
 pub mod verify;
 
 use crate::config::Config;
