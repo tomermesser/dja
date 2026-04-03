@@ -41,7 +41,7 @@ pub fn run(force: bool) -> Result<()> {
     println!("  Data:        {}", data_dir.display());
     println!("  Config:      {}", config_dir.display());
     if let Some(ref profile) = shell_profile {
-        println!("  Shell hooks: {} (dja block only)", profile.display());
+        println!("  Shell hooks: {} (dja integration + PATH entry)", profile.display());
     }
     println!();
 
@@ -103,7 +103,9 @@ fn detect_shell_profile() -> Option<PathBuf> {
     }
 }
 
-/// Remove the dja shell integration block from the profile file.
+/// Remove all dja-related lines from the shell profile:
+/// 1. The `# dja shell integration` block (added by `dja init`)
+/// 2. The `export PATH=".../.local/bin:$PATH"` line (added by install.sh)
 /// Returns true if something was removed.
 fn remove_shell_integration(profile: &PathBuf) -> Result<bool> {
     let contents = match fs::read_to_string(profile) {
@@ -111,18 +113,12 @@ fn remove_shell_integration(profile: &PathBuf) -> Result<bool> {
         Err(_) => return Ok(false),
     };
 
-    let marker = "# dja shell integration";
-    if !contents.contains(marker) {
-        return Ok(false);
-    }
-
-    // The block starts with a blank line + marker and ends before the next
-    // non-dja content. We remove from the marker line to the end of the
-    // `_dja_sync_env` call (the last line of the block).
     let mut lines: Vec<&str> = contents.lines().collect();
-    let start = lines.iter().position(|l| l.contains(marker));
-    if let Some(start_idx) = start {
-        // Find the end: the _dja_sync_env standalone call at the end of the block
+    let original_len = lines.len();
+
+    // 1. Remove the shell integration block (marker → _dja_sync_env)
+    let marker = "# dja shell integration";
+    if let Some(start_idx) = lines.iter().position(|l| l.contains(marker)) {
         let mut end_idx = start_idx;
         for (i, line) in lines[start_idx..].iter().enumerate() {
             if *line == "_dja_sync_env" {
@@ -137,15 +133,28 @@ fn remove_shell_integration(profile: &PathBuf) -> Result<bool> {
             start_idx
         };
         lines.drain(remove_start..=end_idx);
-
-        let mut new_contents = lines.join("\n");
-        // Ensure file ends with a newline
-        if !new_contents.ends_with('\n') {
-            new_contents.push('\n');
-        }
-        fs::write(profile, new_contents)?;
-        return Ok(true);
     }
 
-    Ok(false)
+    // 2. Remove the PATH export line added by install.sh
+    //    Matches: export PATH="<anything>/.local/bin:$PATH"
+    lines.retain(|line| {
+        let trimmed = line.trim();
+        !(trimmed.contains("/.local/bin") && trimmed.starts_with("export PATH="))
+    });
+
+    if lines.len() == original_len {
+        return Ok(false);
+    }
+
+    // Remove trailing blank lines
+    while lines.last() == Some(&"") {
+        lines.pop();
+    }
+
+    let mut new_contents = lines.join("\n");
+    if !new_contents.is_empty() {
+        new_contents.push('\n');
+    }
+    fs::write(profile, new_contents)?;
+    Ok(true)
 }
