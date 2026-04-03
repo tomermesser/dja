@@ -7,14 +7,18 @@ REPO="tomermesser/dja"
 BINARY_NAME="dja"
 INSTALL_DIR="${DJA_INSTALL_DIR:-$HOME/.local/bin}"
 
+BOLD='\033[1m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
+CYAN='\033[0;36m'
+DIM='\033[2m'
 NC='\033[0m'
 
-info()  { printf "${GREEN}[dja]${NC} %s\n" "$1"; }
-warn()  { printf "${YELLOW}[dja]${NC} %s\n" "$1"; }
-error() { printf "${RED}[dja]${NC} %s\n" "$1"; exit 1; }
+info()  { printf "  ${GREEN}>${NC} %s\n" "$1"; }
+warn()  { printf "  ${YELLOW}!${NC} %s\n" "$1"; }
+error() { printf "  ${RED}x${NC} %s\n" "$1"; exit 1; }
+step()  { printf "\n  ${CYAN}%s${NC}\n" "$1"; }
 
 detect_os() {
     case "$(uname -s)" in
@@ -86,7 +90,7 @@ ensure_in_path() {
             if [ -n "$SHELL_RC" ] && ! grep -q "$INSTALL_DIR" "$SHELL_RC" 2>/dev/null; then
                 printf '\nexport PATH="%s:$PATH"\n' "$INSTALL_DIR" >> "$SHELL_RC"
                 warn "Added ${INSTALL_DIR} to PATH in ${SHELL_RC}"
-                warn "Run: source ${SHELL_RC}"
+                warn "Restart your shell or run: source ${SHELL_RC}"
             fi
             export PATH="${INSTALL_DIR}:$PATH"
             ;;
@@ -94,18 +98,29 @@ ensure_in_path() {
 }
 
 main() {
-    info "Installing dja..."
+    echo ""
+    printf "  ${BOLD}dja installer${NC}\n"
+    printf "  ${DIM}Semantic cache proxy for AI coding tools${NC}\n"
+
+    step "Detecting platform..."
     detect_os
     detect_arch
     get_target
+    info "Platform: ${OS}/${ARCH}"
+
+    step "Fetching latest release..."
     get_latest_version
+    info "Version: ${VERSION}"
+
+    step "Installing..."
     install_binary
     ensure_in_path
 
-    info "dja ${VERSION} installed successfully!"
     echo ""
-    info "Run setup:"
-    info "  dja init"
+    printf "  ${GREEN}${BOLD}Installation complete!${NC}\n"
+    echo ""
+    printf "  Get started:\n"
+    printf "  ${DIM}\$${NC} ${BOLD}dja init${NC}\n"
     echo ""
 }
 
