@@ -26,9 +26,25 @@ pub fn encode_invite(payload: &InvitePayload) -> Result<String> {
 }
 
 /// Decode a base64 invite code back into an `InvitePayload`.
+///
+/// Tolerates missing `=` padding (common when copy-pasting from terminals).
 pub fn decode_invite(code: &str) -> Result<InvitePayload> {
+    let trimmed = code.trim();
+    // Re-add stripped padding so the base64 decoder doesn't reject it.
+    let padded;
+    let to_decode = match trimmed.len() % 4 {
+        2 => {
+            padded = format!("{}==", trimmed);
+            padded.as_str()
+        }
+        3 => {
+            padded = format!("{}=", trimmed);
+            padded.as_str()
+        }
+        _ => trimmed,
+    };
     let bytes = B64
-        .decode(code.trim())
+        .decode(to_decode)
         .context("Decoding invite code (not valid base64)")?;
     let json = std::str::from_utf8(&bytes).context("Invite code is not valid UTF-8")?;
     serde_json::from_str(json).context("Invite code JSON is malformed")
@@ -82,10 +98,38 @@ pub async fn run_invite() -> Result<()> {
     };
 
     let code = encode_invite(&payload)?;
-    println!("Share this invite code with a friend:\n");
-    println!("{}", code);
+
+    // ── Identity box ────────────────────────────────────────────────────────
+    let label_w = 14usize; // "display name:" width
+    let value_col = |label: &str, value: &str| {
+        format!("  {:<label_w$} {}", label, value, label_w = label_w)
+    };
+    let rows = vec![
+        value_col("peer id:", &payload.peer_id),
+        value_col("name:", &payload.display_name),
+        value_col("address:", &payload.public_addr),
+    ];
+    let inner_w = rows.iter().map(|r| r.len()).max().unwrap_or(40).max(40);
+    let border_top = format!("╭─ Your P2P invite {}╮", "─".repeat(inner_w - 19));
+    let border_bot = format!("╰{}╯", "─".repeat(inner_w + 2));
+
     println!();
-    println!("They can add you with:  dja p2p add {}", code);
+    println!("{}", border_top);
+    for row in &rows {
+        println!("│{:<width$}│", row, width = inner_w + 2);
+    }
+    println!("{}", border_bot);
+
+    // ── Invite code block ───────────────────────────────────────────────────
+    println!();
+    println!("  Invite code:");
+    println!();
+    println!("    {}", code);
+    println!();
+    println!("  Share with your friend — they run:");
+    println!();
+    println!("    dja p2p add {}", code);
+    println!();
     Ok(())
 }
 
